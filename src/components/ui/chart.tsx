@@ -129,6 +129,25 @@ const ChartTooltipContent = React.forwardRef<
       color,
       nameKey,
       labelKey,
+      /* eslint-disable @typescript-eslint/no-unused-vars */
+      coordinate,
+      viewBox,
+      offset,
+      labelStyle,
+      itemStyle,
+      contentStyle,
+      allowEscapeViewBox,
+      animationDuration,
+      animationEasing,
+      isAnimationActive,
+      filterNull,
+      useTranslate3d,
+      reverseStackOrder,
+      shared,
+      trigger,
+      type,
+      /* eslint-enable @typescript-eslint/no-unused-vars */
+      ...props
     },
     ref
   ) => {
@@ -183,6 +202,7 @@ const ChartTooltipContent = React.forwardRef<
           "grid min-w-[8rem] items-start gap-1.5 rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-xs shadow-xl",
           className
         )}
+        {...props}
       >
         {!nestLabel ? tooltipLabel : null}
         <div className="grid gap-1.5">
@@ -268,7 +288,25 @@ const ChartLegendContent = React.forwardRef<
     }
 >(
   (
-    { className, hideIcon = false, payload, verticalAlign = "bottom", nameKey },
+    {
+      className,
+      hideIcon = false,
+      payload,
+      verticalAlign = "bottom",
+      nameKey,
+      /* eslint-disable @typescript-eslint/no-unused-vars */
+      iconSize,
+      align,
+      layout,
+      onBBoxUpdate,
+      chartWidth,
+      chartHeight,
+      margin,
+      width,
+      height,
+      /* eslint-enable @typescript-eslint/no-unused-vars */
+      ...props
+    },
     ref
   ) => {
     const { config } = useChart()
@@ -285,6 +323,7 @@ const ChartLegendContent = React.forwardRef<
           verticalAlign === "top" ? "pb-3" : "pt-3",
           className
         )}
+        {...props}
       >
         {payload.map((item) => {
           const key = `${nameKey || item.dataKey || "value"}`

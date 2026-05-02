@@ -40,6 +40,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     { href: '/', label: 'Dashboard', icon: LayoutDashboard },
     { href: '/transactions', label: 'Transactions', icon: ReceiptIndianRupee },
     { href: '/date-range', label: 'Date Range Analysis', icon: CalendarDays },
+    { href: '/age-calculator', label: 'Current Age Calculator', icon: CalendarDays },
     { href: '/categories', label: 'Categories', icon: Shapes },
     { href: '/reports', label: 'Reports', icon: PieChart },
     { href: '/search', label: 'Search', icon: Search },
