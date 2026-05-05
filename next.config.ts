@@ -4,7 +4,7 @@ const nextConfig: NextConfig = {
   /* config options here */
   output: "standalone",
   experimental: {
-    serverComponentsExternalPackages: ['googleapis'],
+    serverExternalPackages: ['googleapis'],
   },
   typescript: {
     ignoreBuildErrors: true,

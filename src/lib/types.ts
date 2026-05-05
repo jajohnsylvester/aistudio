@@ -41,4 +41,6 @@ export type ImportantDate = {
   title: string;
   date: string;
   description?: string;
+  price?: number;
+  shop?: string;
 };

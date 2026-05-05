@@ -704,6 +704,8 @@ function parseImportantDateRows(rows: any[][] | null | undefined): ImportantDate
     const titleIndex = headers.indexOf('title');
     const dateIndex = headers.indexOf('date');
     const descriptionIndex = headers.indexOf('description');
+    const priceIndex = headers.indexOf('price');
+    const shopIndex = headers.indexOf('shop');
 
     return rows.slice(1).map((row, index): ImportantDate | null => {
         if (row.every(cell => !cell)) return null;
@@ -713,6 +715,8 @@ function parseImportantDateRows(rows: any[][] | null | undefined): ImportantDate
             title: row[titleIndex] || '',
             date: row[dateIndex] || '',
             description: row[descriptionIndex] || '',
+            price: row[priceIndex] ? parseFloat(row[priceIndex]) : undefined,
+            shop: row[shopIndex] || '',
         }
     }).filter((e): e is ImportantDate => e !== null);
 }
@@ -720,11 +724,11 @@ function parseImportantDateRows(rows: any[][] | null | undefined): ImportantDate
 export async function getImportantDates(sheetName: string): Promise<ImportantDate[]> {
     try {
         const sheets = getSheets();
-        await ensureSheetExists(sheets, sheetName, ['id', 'title', 'date', 'description']);
+        await ensureSheetExists(sheets, sheetName, ['id', 'title', 'date', 'description', 'price', 'shop']);
         
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: SHEET_ID,
-            range: `${sheetName}!A:D`,
+            range: `${sheetName}!A:F`,
         });
 
         return parseImportantDateRows(response.data.values);
@@ -736,7 +740,7 @@ export async function getImportantDates(sheetName: string): Promise<ImportantDat
 
 export async function addImportantDate(sheetName: string, dateData: Omit<ImportantDate, 'id'>): Promise<ImportantDate> {
     const sheets = getSheets();
-    await ensureSheetExists(sheets, sheetName, ['id', 'title', 'date', 'description']);
+    await ensureSheetExists(sheets, sheetName, ['id', 'title', 'date', 'description', 'price', 'shop']);
 
     const response = await sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
@@ -748,7 +752,7 @@ export async function addImportantDate(sheetName: string, dateData: Omit<Importa
     const newId = maxId + 1;
 
     const newDate: ImportantDate = { ...dateData, id: newId.toString() };
-    const newRow = [newDate.id, newDate.title, newDate.date, newDate.description || ''];
+    const newRow = [newDate.id, newDate.title, newDate.date, newDate.description || '', newDate.price || '', newDate.shop || ''];
 
     await sheets.spreadsheets.values.append({
         spreadsheetId: SHEET_ID,
@@ -771,11 +775,11 @@ export async function updateImportantDate(sheetName: string, dateData: Important
     }
     
     const { rowIndex } = found;
-    const updatedRow = [dateData.id, dateData.title, dateData.date, dateData.description || ''];
+    const updatedRow = [dateData.id, dateData.title, dateData.date, dateData.description || '', dateData.price || '', dateData.shop || ''];
 
     await sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
-        range: `${sheetName}!A${rowIndex}:D${rowIndex}`,
+        range: `${sheetName}!A${rowIndex}:F${rowIndex}`,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
             values: [updatedRow],

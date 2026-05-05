@@ -24,13 +24,18 @@ import {
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { type ImportantDate } from '@/lib/types';
-import { Loader2 } from 'lucide-react';
+import { format, isValid } from 'date-fns';
+import { Calendar as CalendarIcon, Loader2 } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { Calendar } from '@/components/ui/calendar';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 
 const importantDateSchema = z.object({
   title: z.string().min(2, { message: 'Title must be at least 2 characters.' }),
-  date: z.string().min(1, { message: 'Date is required.' }),
+  date: z.date({ required_error: 'Date is required.' }),
   description: z.string().optional(),
+  price: z.coerce.number().optional(),
+  shop: z.string().optional(),
 });
 
 type ImportantDateFormValues = z.infer<typeof importantDateSchema>;
@@ -54,32 +59,44 @@ export function ImportantDateDialog({
     resolver: zodResolver(importantDateSchema),
     defaultValues: {
       title: '',
-      date: '',
+      date: new Date(),
       description: '',
+      price: 0,
+      shop: '',
     },
   });
 
   useEffect(() => {
     if (editingDate) {
+      const parsedDate = new Date(editingDate.date);
       form.reset({
         title: editingDate.title,
-        date: editingDate.date,
+        date: isValid(parsedDate) ? parsedDate : new Date(),
         description: editingDate.description || '',
+        price: editingDate.price,
+        shop: editingDate.shop || '',
       });
     } else {
       form.reset({
         title: '',
-        date: '',
+        date: new Date(),
         description: '',
+        price: undefined,
+        shop: '',
       });
     }
   }, [editingDate, form, open]);
 
   const handleSubmit = async (data: ImportantDateFormValues) => {
+    const formattedData = {
+      ...data,
+      date: format(data.date, 'yyyy-MM-dd'),
+      price: data.price ? Number(data.price) : undefined,
+    };
     if (editingDate) {
-      await onSubmit({ ...editingDate, ...data });
+      await onSubmit({ ...editingDate, ...formattedData });
     } else {
-      await onSubmit(data);
+      await onSubmit(formattedData);
     }
   };
 
@@ -115,8 +132,59 @@ export function ImportantDateDialog({
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>Date</FormLabel>
+                   <Popover>
+                      <PopoverTrigger asChild>
+                        <FormControl>
+                          <Button
+                            variant={"outline"}
+                            className={cn(
+                              "w-full pl-3 text-left font-normal",
+                              !field.value && "text-muted-foreground"
+                            )}
+                          >
+                            {field.value ? (
+                              format(field.value, "PPP")
+                            ) : (
+                              <span>Pick a date</span>
+                            )}
+                            <CalendarIcon className="ml-auto h-4 w-4 opacity-50" />
+                          </Button>
+                        </FormControl>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-auto p-0" align="start">
+                        <Calendar
+                          mode="single"
+                          selected={field.value}
+                          onSelect={field.onChange}
+                          initialFocus
+                        />
+                      </PopoverContent>
+                    </Popover>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="price"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Price (Optional)</FormLabel>
                   <FormControl>
-                    <Input type="text" placeholder="e.g., 20th Oct, every year or specific date" {...field} />
+                    <Input type="number" placeholder="0.00" {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="shop"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Shop (Optional)</FormLabel>
+                  <FormControl>
+                    <Input placeholder="Shop name..." {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>

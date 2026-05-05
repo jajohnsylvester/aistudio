@@ -142,7 +142,7 @@ export function ImportantDateManager({ sheetName, title }: ImportantDateManagerP
             <div className="flex justify-center p-12">
               <Loader2 className="h-12 w-12 animate-spin text-primary" />
             </div>
-          ) : dates.length === 0 ? (
+          ) : (dates || []).length === 0 ? (
             <div className="text-center py-12 border-2 border-dashed rounded-lg">
               <CalendarHeart className="h-12 w-12 mx-auto text-muted-foreground opacity-20 mb-4" />
               <p className="text-muted-foreground">No important dates recorded yet.</p>
@@ -155,6 +155,8 @@ export function ImportantDateManager({ sheetName, title }: ImportantDateManagerP
                   <TableRow>
                     <TableHead>Title</TableHead>
                     <TableHead>Date</TableHead>
+                    <TableHead>Price</TableHead>
+                    <TableHead>Shop</TableHead>
                     <TableHead className="hidden md:table-cell">Description</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
@@ -164,6 +166,8 @@ export function ImportantDateManager({ sheetName, title }: ImportantDateManagerP
                     <TableRow key={item.id}>
                       <TableCell className="font-medium">{item.title}</TableCell>
                       <TableCell className="whitespace-nowrap">{item.date}</TableCell>
+                      <TableCell>{item.price ? `₹${item.price}` : '-'}</TableCell>
+                      <TableCell>{item.shop || '-'}</TableCell>
                       <TableCell className="hidden md:table-cell text-sm text-muted-foreground max-w-xs truncate">
                         {item.description}
                       </TableCell>
