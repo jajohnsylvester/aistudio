@@ -35,3 +35,10 @@ export type CategoryWithBudget = {
     budget: number;
     isStatic: boolean;
 };
+
+export type ImportantDate = {
+  id: string;
+  title: string;
+  date: string;
+  description?: string;
+};

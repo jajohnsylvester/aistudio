@@ -31,6 +31,7 @@ import {
   FileText,
   TableProperties,
   CalendarDays,
+  CalendarHeart,
 } from 'lucide-react';
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
@@ -41,6 +42,8 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     { href: '/transactions', label: 'Transactions', icon: ReceiptIndianRupee },
     { href: '/date-range', label: 'Date Range Analysis', icon: CalendarDays },
     { href: '/age-calculator', label: 'Current Age Calculator', icon: CalendarDays },
+    { href: '/pondy-dates', label: 'Pondy Important Dates', icon: CalendarHeart },
+    { href: '/chennai-dates', label: 'Chennai Important Dates', icon: CalendarHeart },
     { href: '/categories', label: 'Categories', icon: Shapes },
     { href: '/reports', label: 'Reports', icon: PieChart },
     { href: '/search', label: 'Search', icon: Search },

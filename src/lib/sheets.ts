@@ -3,7 +3,7 @@
 'use server';
 
 import { google } from 'googleapis';
-import type { Expense, Budget } from './types';
+import type { Expense, Budget, ImportantDate } from './types';
 import { format, getYear } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 
@@ -690,4 +690,131 @@ export async function getGoogleDocContent(documentId: string): Promise<any> {
         }
         throw new Error('An unknown error occurred while fetching the Google Doc.');
     }
+}
+
+// --- IMPORTANT DATES ---
+
+function parseImportantDateRows(rows: any[][] | null | undefined): ImportantDate[] {
+    if (!rows || rows.length <= 1) {
+        return [];
+    }
+
+    const headers = rows[0];
+    const idIndex = headers.indexOf('id');
+    const titleIndex = headers.indexOf('title');
+    const dateIndex = headers.indexOf('date');
+    const descriptionIndex = headers.indexOf('description');
+
+    return rows.slice(1).map((row, index): ImportantDate | null => {
+        if (row.every(cell => !cell)) return null;
+
+        return {
+            id: row[idIndex] || (new Date().getTime() + index).toString(),
+            title: row[titleIndex] || '',
+            date: row[dateIndex] || '',
+            description: row[descriptionIndex] || '',
+        }
+    }).filter((e): e is ImportantDate => e !== null);
+}
+
+export async function getImportantDates(sheetName: string): Promise<ImportantDate[]> {
+    try {
+        const sheets = getSheets();
+        await ensureSheetExists(sheets, sheetName, ['id', 'title', 'date', 'description']);
+        
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: SHEET_ID,
+            range: `${sheetName}!A:D`,
+        });
+
+        return parseImportantDateRows(response.data.values);
+    } catch (error) {
+        console.error(`Error fetching important dates for "${sheetName}":`, error);
+        return [];
+    }
+}
+
+export async function addImportantDate(sheetName: string, dateData: Omit<ImportantDate, 'id'>): Promise<ImportantDate> {
+    const sheets = getSheets();
+    await ensureSheetExists(sheets, sheetName, ['id', 'title', 'date', 'description']);
+
+    const response = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${sheetName}!A:A`,
+    });
+
+    const existingIds = response.data.values ? response.data.values.flat().map(id => parseInt(id, 10)).filter(id => !isNaN(id)) : [];
+    const maxId = existingIds.length > 0 ? Math.max(0, ...existingIds) : 0;
+    const newId = maxId + 1;
+
+    const newDate: ImportantDate = { ...dateData, id: newId.toString() };
+    const newRow = [newDate.id, newDate.title, newDate.date, newDate.description || ''];
+
+    await sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID,
+        range: sheetName,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+            values: [newRow],
+        },
+    });
+
+    return newDate;
+}
+
+export async function updateImportantDate(sheetName: string, dateData: ImportantDate): Promise<ImportantDate> {
+    const sheets = getSheets();
+    const found = await findRowById(sheets, sheetName, dateData.id);
+
+    if (found === null) {
+        throw new Error('Important date not found to update');
+    }
+    
+    const { rowIndex } = found;
+    const updatedRow = [dateData.id, dateData.title, dateData.date, dateData.description || ''];
+
+    await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${sheetName}!A${rowIndex}:D${rowIndex}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+            values: [updatedRow],
+        },
+    });
+
+    return dateData;
+}
+
+export async function deleteImportantDate(sheetName: string, dateData: ImportantDate): Promise<void> {
+    const sheets = getSheets();
+    const found = await findRowById(sheets, sheetName, dateData.id);
+
+    if (found === null) {
+        throw new Error('Important date not found to delete');
+    }
+    
+    const { rowIndex } = found;
+    const sheetId = await getSheetIdByName(sheets, sheetName);
+    
+    if (sheetId === undefined) {
+        throw new Error(`Could not find sheet ID for "${sheetName}" to delete row.`);
+    }
+
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: {
+            requests: [
+                {
+                    deleteDimension: {
+                        range: {
+                            sheetId: sheetId, 
+                            dimension: 'ROWS',
+                            startIndex: rowIndex - 1,
+                            endIndex: rowIndex,
+                        }
+                    }
+                }
+            ]
+        }
+    });
 }
