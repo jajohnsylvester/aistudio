@@ -73,7 +73,7 @@ export function ImportantDateDialog({
         title: editingDate.title,
         date: isValid(parsedDate) ? parsedDate : new Date(),
         description: editingDate.description || '',
-        price: editingDate.price,
+        price: editingDate.price || ("" as any),
         shop: editingDate.shop || '',
       });
     } else {
@@ -81,7 +81,7 @@ export function ImportantDateDialog({
         title: '',
         date: new Date(),
         description: '',
-        price: undefined,
+        price: "" as any,
         shop: '',
       });
     }

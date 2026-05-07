@@ -162,7 +162,7 @@ export function ImportantDateManager({ sheetName, title }: ImportantDateManagerP
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {dates.map((item) => (
+                  {(dates || []).map((item) => (
                     <TableRow key={item.id}>
                       <TableCell className="font-medium">{item.title}</TableCell>
                       <TableCell className="whitespace-nowrap">{item.date}</TableCell>

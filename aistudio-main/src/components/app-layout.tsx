@@ -52,6 +52,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     { href: '/crossover-strategy', label: 'Personalized Stock Analyser App', icon: LineChart },
     { href: '/alpha-advantage', label: 'Alpha Advantage App', icon: Crosshair },
     { href: '/spreadsheet', label: 'StockMarketPortfolio sheet', icon: FileSpreadsheet },
+    { href: '/notes-sheet', label: 'Notes', icon: FileText },
     { href: '/notes', label: 'Indian Stock Screening Strategy Doc', icon: FileText },
     { href: '/appsheet', label: 'AppSheet Sheet', icon: TableProperties },
     { href: '/stocknotes', label: 'StockNotes Sheet', icon: FileText },
