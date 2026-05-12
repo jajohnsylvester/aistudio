@@ -44,10 +44,3 @@ export type ImportantDate = {
   price?: number;
   shop?: string;
 };
-
-export type NoteItem = {
-  id: string;
-  title: string;
-  content: string;
-  updatedAt: string;
-};
