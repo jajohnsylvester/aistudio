@@ -1,0 +1,7 @@
+id,description,amount,category,date
+1,Monthly rent,1100.00,Housing,2024-07-29T12:00:00.000Z
+2,Groceries from Whole Foods,142.34,Food,2024-07-27T12:00:00.000Z
+3,Gas for the car,55.78,Transportation,2024-07-26T12:00:00.000Z
+4,Internet Bill,65.00,Utilities,2024-07-24T12:00:00.000Z
+5,"Tickets to see ""Dune Part Two""",35.50,Entertainment,2024-07-22T12:00:00.000Z
+6,New running shoes,129.99,Shopping,2024-07-21T12:00:00.000Z
