@@ -44,3 +44,9 @@ export type ImportantDate = {
   price?: number;
   shop?: string;
 };
+
+export type Note = {
+  id: string;
+  content: string;
+  date: string;
+};

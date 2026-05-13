@@ -39,6 +39,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
   const menuItems = [
     { href: '/', label: 'Dashboard', icon: LayoutDashboard },
+    { href: '/scratch-notes', label: 'Notes', icon: FileText },
     { href: '/transactions', label: 'Transactions', icon: ReceiptIndianRupee },
     { href: '/date-range', label: 'Date Range Analysis', icon: CalendarDays },
     { href: '/age-calculator', label: 'Current Age Calculator', icon: CalendarDays },
@@ -48,9 +49,6 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     { href: '/reports', label: 'Reports', icon: PieChart },
     { href: '/search', label: 'Search', icon: Search },
     { href: '/personal-perplexity', label: 'Personal Perplexity App', icon: BrainCircuit },
-    { href: '/stock-predictor', label: 'Stock Predictor App', icon: TrendingUp },
-    { href: '/crossover-strategy', label: 'Personalized Stock Analyser App', icon: LineChart },
-    { href: '/alpha-advantage', label: 'Alpha Advantage App', icon: Crosshair },
     { href: '/spreadsheet', label: 'StockMarketPortfolio sheet', icon: FileSpreadsheet },
     { href: '/notes', label: 'Indian Stock Screening Strategy Doc', icon: FileText },
     { href: '/appsheet', label: 'AppSheet Sheet', icon: TableProperties },

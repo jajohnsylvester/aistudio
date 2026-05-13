@@ -822,3 +822,132 @@ export async function deleteImportantDate(sheetName: string, dateData: Important
         }
     });
 }
+
+// --- SCRATCH NOTES ---
+
+function parseNoteRows(rows: any[][] | null | undefined): Note[] {
+    if (!rows || rows.length <= 1) {
+        return [];
+    }
+
+    const headers = rows[0];
+    const idIndex = headers.indexOf('id');
+    const contentIndex = headers.indexOf('content');
+    const dateIndex = headers.indexOf('date');
+
+    return rows.slice(1).map((row, index): Note | null => {
+        if (row.every(cell => !cell)) return null;
+
+        return {
+            id: row[idIndex] || (new Date().getTime() + index).toString(),
+            content: row[contentIndex] || '',
+            date: row[dateIndex] || '',
+        }
+    }).filter((e): e is Note => e !== null);
+}
+
+export async function getNotes(): Promise<Note[]> {
+    try {
+        const sheets = getSheets();
+        const range = 'ScratchNotes';
+        await ensureSheetExists(sheets, range, ['id', 'content', 'date']);
+        
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: SHEET_ID,
+            range: `${range}!A:C`,
+        });
+
+        return parseNoteRows(response.data.values);
+    } catch (error) {
+        console.error('Error fetching notes:', error);
+        return [];
+    }
+}
+
+export async function addNote(noteData: Omit<Note, 'id'>): Promise<Note> {
+    const sheets = getSheets();
+    const range = 'ScratchNotes';
+    await ensureSheetExists(sheets, range, ['id', 'content', 'date']);
+
+    const response = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${range}!A:A`,
+    });
+
+    const existingIds = response.data.values ? response.data.values.flat().map(id => parseInt(id, 10)).filter(id => !isNaN(id)) : [];
+    const maxId = existingIds.length > 0 ? Math.max(0, ...existingIds) : 0;
+    const newId = maxId + 1;
+
+    const newNote: Note = { ...noteData, id: newId.toString() };
+    const newRow = [newNote.id, newNote.content, newNote.date];
+
+    await sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID,
+        range: range,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+            values: [newRow],
+        },
+    });
+
+    return newNote;
+}
+
+export async function updateNote(noteData: Note): Promise<Note> {
+    const sheets = getSheets();
+    const range = 'ScratchNotes';
+    const found = await findRowById(sheets, range, noteData.id);
+
+    if (found === null) {
+        throw new Error('Note not found to update');
+    }
+    
+    const { rowIndex } = found;
+    const updatedRow = [noteData.id, noteData.content, noteData.date];
+
+    await sheets.spreadsheets.values.update({
+        spreadsheetId: SHEET_ID,
+        range: `${range}!A${rowIndex}:C${rowIndex}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+            values: [updatedRow],
+        },
+    });
+
+    return noteData;
+}
+
+export async function deleteNote(noteId: string): Promise<void> {
+    const sheets = getSheets();
+    const range = 'ScratchNotes';
+    const found = await findRowById(sheets, range, noteId);
+
+    if (found === null) {
+        throw new Error('Note not found to delete');
+    }
+    
+    const { rowIndex } = found;
+    const sheetId = await getSheetIdByName(sheets, range);
+    
+    if (sheetId === undefined) {
+        throw new Error(`Could not find sheet ID for "${range}" to delete row.`);
+    }
+
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: {
+            requests: [
+                {
+                    deleteDimension: {
+                        range: {
+                            sheetId: sheetId, 
+                            dimension: 'ROWS',
+                            startIndex: rowIndex - 1,
+                            endIndex: rowIndex,
+                        }
+                    }
+                }
+            ]
+        }
+    });
+}
