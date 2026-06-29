@@ -32,6 +32,7 @@ import {
   TableProperties,
   CalendarDays,
   CalendarHeart,
+  Briefcase,
 } from 'lucide-react';
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
@@ -52,6 +53,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     { href: '/appsheet', label: 'AppSheet Sheet', icon: TableProperties },
     { href: '/stocknotes', label: 'StockNotes Sheet', icon: FileText },
     { href: '/magic-formula', label: 'Magic formula Sheet', icon: Wand2 },
+    { href: '/paytm-portfolio', label: 'Paytm Money Portfolio', icon: Briefcase },
   ];
 
   return (
