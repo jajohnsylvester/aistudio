@@ -5,8 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Input } from '@/components/ui/input';
-import { Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown, AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key, Copy, Check } from 'lucide-react';
+import { Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown, AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key, Copy, Check, Settings } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
@@ -16,14 +15,9 @@ interface MCPStatus {
   apiKeyConfigured: boolean;
   secretConfigured: boolean;
   localAccessTokenConfigured?: boolean;
+  localApiKeyConfigured?: boolean;
+  localSecretConfigured?: boolean;
   geminiKeyConfigured?: boolean;
-  authRequired?: string;
-  oauthFlow?: {
-    step1: string;
-    step2: string;
-    step3: string;
-    step4: string;
-  };
   timestamp?: string;
   error?: string;
 }
@@ -56,11 +50,13 @@ export default function PaytmPortfolioPage() {
   const [portfolio, setPortfolio] = useState<PortfolioData | null>(null);
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(false);
-  const [loginUrl, setLoginUrl] = useState<string | null>(null);
-  const [requestToken, setRequestToken] = useState('');
-  const [accessTokenInfo, setAccessTokenInfo] = useState<any>(null);
   const [copied, setCopied] = useState(false);
   const { toast } = useToast();
+
+  // Check if running locally with placeholder values
+  const hasRealApiKeys = status?.localApiKeyConfigured && status?.apiKeyConfigured;
+  const hasRealSecret = status?.localSecretConfigured && status?.secretConfigured;
+  const hasAccessToken = status?.hasAccessToken || status?.localAccessTokenConfigured;
 
   const checkStatus = useCallback(async () => {
     setIsLoadingStatus(true);
@@ -107,54 +103,24 @@ export default function PaytmPortfolioPage() {
     }
   }, [toast]);
 
-  const getLoginUrl = async () => {
-    try {
-      const response = await fetch('/api/paytm-portfolio?action=login_url');
-      const data = await response.json();
-      setLoginUrl(data.login_url);
-      toast({
-        title: 'Login URL Generated',
-        description: 'Click the link to authenticate with Paytm Money',
-      });
-    } catch (error) {
+  const getLoginUrl = () => {
+    if (!status?.apiKeyConfigured) {
       toast({
         variant: 'destructive',
-        title: 'Error',
-        description: 'Failed to get login URL',
-      });
-    }
-  };
-
-  const exchangeToken = async () => {
-    if (!requestToken.trim()) {
-      toast({
-        variant: 'destructive',
-        title: 'Error',
-        description: 'Please enter the request token from the redirect URL',
+        title: 'API Key Not Configured',
+        description: 'Please set PAYTM_MONEY_API_KEY in your .env file first',
       });
       return;
     }
 
-    try {
-      const response = await fetch(`/api/paytm-portfolio?action=exchange_token&request_token=${encodeURIComponent(requestToken)}`);
-      const data = await response.json();
+    const state = Date.now().toString();
+    const apiKey = 'YOUR_API_KEY_PLACEHOLDER'; // Will be replaced server-side
 
-      if (data.error) {
-        throw new Error(data.error);
-      }
-
-      setAccessTokenInfo(data);
-      toast({
-        title: 'Access Token Generated!',
-        description: 'Copy the access token and add it to your .env file',
-      });
-    } catch (error) {
-      toast({
-        variant: 'destructive',
-        title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to exchange token',
-      });
-    }
+    // Open login in new window
+    window.open(
+      `/api/paytm-portfolio?action=login_url&state=${state}&redirect=${encodeURIComponent(window.location.origin + '/paytm-portfolio/callback')}`,
+      '_blank'
+    );
   };
 
   const copyToClipboard = (text: string) => {
@@ -172,10 +138,10 @@ export default function PaytmPortfolioPage() {
   }, [checkStatus]);
 
   useEffect(() => {
-    if (status?.hasAccessToken || status?.localAccessTokenConfigured) {
+    if (hasAccessToken) {
       fetchPortfolio();
     }
-  }, [status?.hasAccessToken, status?.localAccessTokenConfigured, fetchPortfolio]);
+  }, [hasAccessToken, fetchPortfolio]);
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-IN', {
@@ -198,14 +164,14 @@ export default function PaytmPortfolioPage() {
             Paytm Money Portfolio
           </h1>
           <p className="text-muted-foreground">
-            Your stock holdings powered by Paytm Money API via MCP
+            Your stock holdings powered by Paytm Money API
           </p>
         </div>
         <Button
           variant="outline"
           onClick={() => {
             checkStatus();
-            if (status?.hasAccessToken || status?.localAccessTokenConfigured) {
+            if (hasAccessToken) {
               fetchPortfolio();
             }
           }}
@@ -225,10 +191,10 @@ export default function PaytmPortfolioPage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Wallet className="h-5 w-5" />
-            MCP Server Connectivity
+            Server Status
           </CardTitle>
           <CardDescription>
-            Paytm Money MCP server connection status
+            Paytm Money API connection status
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -239,29 +205,43 @@ export default function PaytmPortfolioPage() {
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="flex items-center gap-2">
-                {status?.connected ? (
+                {hasRealApiKeys ? (
                   <CheckCircle className="h-5 w-5 text-green-500" />
                 ) : (
                   <AlertCircle className="h-5 w-5 text-destructive" />
                 )}
                 <div>
-                  <p className="text-sm font-medium">API Credentials</p>
-                  <p className={`text-xs ${status?.connected ? 'text-green-600' : 'text-destructive'}`}>
-                    {status?.connected ? 'Configured' : 'Missing'}
+                  <p className="text-sm font-medium">API Key</p>
+                  <p className={`text-xs ${hasRealApiKeys ? 'text-green-600' : 'text-destructive'}`}>
+                    {hasRealApiKeys ? 'Configured' : 'Not Set'}
                   </p>
                 </div>
               </div>
 
               <div className="flex items-center gap-2">
-                {(status?.hasAccessToken || status?.localAccessTokenConfigured) ? (
+                {hasRealSecret ? (
+                  <CheckCircle className="h-5 w-5 text-green-500" />
+                ) : (
+                  <AlertCircle className="h-5 w-5 text-destructive" />
+                )}
+                <div>
+                  <p className="text-sm font-medium">API Secret</p>
+                  <p className={`text-xs ${hasRealSecret ? 'text-green-600' : 'text-destructive'}`}>
+                    {hasRealSecret ? 'Configured' : 'Not Set'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {hasAccessToken ? (
                   <CheckCircle className="h-5 w-5 text-green-500" />
                 ) : (
                   <AlertCircle className="h-5 w-5 text-yellow-500" />
                 )}
                 <div>
                   <p className="text-sm font-medium">Access Token</p>
-                  <p className={`text-xs ${(status?.hasAccessToken || status?.localAccessTokenConfigured) ? 'text-green-600' : 'text-yellow-600'}`}>
-                    {(status?.hasAccessToken || status?.localAccessTokenConfigured) ? 'Configured' : 'OAuth Required'}
+                  <p className={`text-xs ${hasAccessToken ? 'text-green-600' : 'text-yellow-600'}`}>
+                    {hasAccessToken ? 'Active' : 'OAuth Required'}
                   </p>
                 </div>
               </div>
@@ -275,21 +255,7 @@ export default function PaytmPortfolioPage() {
                 <div>
                   <p className="text-sm font-medium">Gemini AI</p>
                   <p className={`text-xs ${status?.geminiKeyConfigured ? 'text-green-600' : 'text-yellow-600'}`}>
-                    {status?.geminiKeyConfigured ? 'Configured' : 'Not Set'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {status?.apiKeyConfigured && status?.secretConfigured ? (
-                  <CheckCircle className="h-5 w-5 text-green-500" />
-                ) : (
-                  <AlertCircle className="h-5 w-5 text-yellow-500" />
-                )}
-                <div>
-                  <p className="text-sm font-medium">API Key & Secret</p>
-                  <p className={`text-xs ${status?.apiKeyConfigured && status?.secretConfigured ? 'text-green-600' : 'text-yellow-600'}`}>
-                    {status?.apiKeyConfigured && status?.secretConfigured ? 'Configured' : 'Not Set'}
+                    {status?.geminiKeyConfigured ? 'Configured' : 'Optional'}
                   </p>
                 </div>
               </div>
@@ -303,91 +269,77 @@ export default function PaytmPortfolioPage() {
         </CardContent>
       </Card>
 
-      {/* OAuth Setup Card - shown when access token is missing */}
-      {status?.connected && !status.hasAccessToken && !status.localAccessTokenConfigured && !isLoadingStatus && (
+      {/* Setup Instructions - shown when API keys are missing */}
+      {(!hasRealApiKeys || !hasRealSecret) && !isLoadingStatus && (
+        <Card className="border-destructive">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Settings className="h-5 w-5 text-destructive" />
+              Setup Required
+            </CardTitle>
+            <CardDescription>
+              Configure your Paytm Money API credentials
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Update your <code>.env</code> file with actual values (not placeholders):
+            </p>
+            <div className="bg-muted p-4 rounded-lg space-y-2 font-mono text-sm">
+              <p><span className="text-muted-foreground"># Get from:</span> <a href="https://developer.paytmmoney.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">developer.paytmmoney.com</a></p>
+              <p>PAYTM_MONEY_API_KEY=<span className="text-red-500">your_actual_api_key_here</span></p>
+              <p>PAYTM_MONEY_SECRET=<span className="text-red-500">your_actual_secret_here</span></p>
+              <p className="text-muted-foreground"># For AI insights:</p>
+              <p>GEMINI_API_KEY=<span className="text-red-500">your_gemini_key_here</span></p>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              After updating .env, restart your development server.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* OAuth Setup Card - shown when API keys are set but access token is missing */}
+      {hasRealApiKeys && hasRealSecret && !hasAccessToken && !isLoadingStatus && (
         <Card className="border-yellow-500/50">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Key className="h-5 w-5 text-yellow-500" />
-              OAuth Setup Required
+              OAuth Authentication Required
             </CardTitle>
             <CardDescription>
-              Complete the OAuth flow to access your portfolio
+              Connect your Paytm Money account to view your portfolio
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {!loginUrl ? (
-              <div className="space-y-4">
-                <p className="text-sm text-muted-foreground">
-                  Paytm Money requires OAuth authentication. Click below to get started.
-                </p>
-                <Button onClick={getLoginUrl} className="w-full">
-                  <ExternalLink className="mr-2 h-4 w-4" />
-                  Generate Login URL
-                </Button>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <p className="text-sm font-medium">Step 1: Click the link below to login</p>
-                  <a
-                    href={loginUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-2 text-sm text-blue-600 hover:underline break-all"
-                  >
-                    <ExternalLink className="h-4 w-4 flex-shrink-0" />
-                    {loginUrl}
-                  </a>
-                </div>
-
-                <div className="space-y-2">
-                  <p className="text-sm font-medium">Step 2: After login, paste the request_token from redirect URL</p>
-                  <p className="text-xs text-muted-foreground">
-                    After successful login, you will be redirected to your configured redirect URL.
-                    Look for the <code>request_token</code> parameter in the URL.
-                  </p>
-                  <div className="flex gap-2">
-                    <Input
-                      placeholder="Enter request_token from redirect URL"
-                      value={requestToken}
-                      onChange={(e) => setRequestToken(e.target.value)}
-                    />
-                    <Button onClick={exchangeToken}>Exchange</Button>
-                  </div>
-                </div>
-
-                {accessTokenInfo && (
-                  <div className="space-y-2 p-4 bg-green-50 dark:bg-green-950 rounded-lg">
-                    <p className="text-sm font-medium text-green-700 dark:text-green-400">
-                      Access Token Generated!
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Add this to your <code>.env</code> file:
-                    </p>
-                    <div className="relative">
-                      <code className="block p-2 bg-muted rounded text-xs break-all">
-                        PAYTM_ACCESS_TOKEN={accessTokenInfo.access_token}
-                      </code>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="absolute top-1 right-1"
-                        onClick={() => copyToClipboard(accessTokenInfo.access_token)}
-                      >
-                        {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+            <p className="text-sm text-muted-foreground">
+              Click the button below to login with your Paytm Money account. After successful authentication, you'll receive an access token.
+            </p>
+            <Button onClick={getLoginUrl} className="w-full" size="lg">
+              <ExternalLink className="mr-2 h-4 w-4" />
+              Login with Paytm Money
+            </Button>
+            <div className="bg-muted p-3 rounded-lg text-xs text-muted-foreground">
+              <p className="font-medium mb-1">How it works:</p>
+              <ol className="list-decimal list-inside space-y-1">
+                <li>Click "Login with Paytm Money" button</li>
+                <li>Enter your Paytm Money credentials (phone, password, OTP)</li>
+                <li>After login, you'll be redirected back with your access token</li>
+                <li>Copy the token and add to .env as PAYTM_ACCESS_TOKEN</li>
+              </ol>
+            </div>
+            <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-950 rounded-lg">
+              <AlertCircle className="h-4 w-4 text-blue-600 flex-shrink-0" />
+              <p className="text-xs text-blue-700 dark:text-blue-400">
+                Make sure your Paytm Money app's redirect URL is set to: <code className="break-all">{typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000'}/paytm-portfolio/callback</code>
+              </p>
+            </div>
           </CardContent>
         </Card>
       )}
 
       {/* Portfolio Summary */}
-      {(status?.hasAccessToken || status?.localAccessTokenConfigured) && portfolio && (
+      {hasAccessToken && portfolio && (
         <>
           <div className="grid gap-4 md:grid-cols-4">
             <Card>
@@ -447,22 +399,24 @@ export default function PaytmPortfolioPage() {
           </div>
 
           {/* AI Insights */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Lightbulb className="h-5 w-5 text-yellow-500" />
-                AI Portfolio Insights
-              </CardTitle>
-              <CardDescription>
-                Powered by Gemini AI
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="prose prose-sm max-w-none dark:prose-invert">
-                <p className="whitespace-pre-wrap">{portfolio.insights}</p>
-              </div>
-            </CardContent>
-          </Card>
+          {status?.geminiKeyConfigured && portfolio.insights && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Lightbulb className="h-5 w-5 text-yellow-500" />
+                  AI Portfolio Insights
+                </CardTitle>
+                <CardDescription>
+                  Powered by Gemini AI
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="prose prose-sm max-w-none dark:prose-invert">
+                  <p className="whitespace-pre-wrap">{portfolio.insights}</p>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Holdings Table */}
           <Card>
@@ -543,24 +497,6 @@ export default function PaytmPortfolioPage() {
         <div className="flex items-center justify-center py-12">
           <Loader2 className="h-12 w-12 animate-spin text-primary" />
         </div>
-      )}
-
-      {/* Not Connected Message */}
-      {status && !status.connected && !isLoadingStatus && (
-        <Card className="border-destructive">
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <AlertCircle className="h-12 w-12 text-destructive mb-4" />
-            <h3 className="text-lg font-semibold">API Credentials Missing</h3>
-            <p className="text-sm text-muted-foreground text-center max-w-md mt-2">
-              Please set the following environment variables:
-            </p>
-            <ul className="text-sm text-muted-foreground mt-4 space-y-1">
-              <li><code>PAYTM_MONEY_API_KEY</code> - From developer.paytmmoney.com</li>
-              <li><code>PAYTM_MONEY_SECRET</code> - From developer.paytmmoney.com</li>
-              <li><code>GEMINI_API_KEY</code> - For AI insights (from aistudio.google.com)</li>
-            </ul>
-          </CardContent>
-        </Card>
       )}
     </div>
   );
