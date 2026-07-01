@@ -4,7 +4,7 @@ import { useEffect, useState, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, CheckCircle, AlertCircle, Copy, Check } from 'lucide-react';
+import { Loader2, CheckCircle, AlertCircle } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 function CallbackContent() {
@@ -12,20 +12,21 @@ function CallbackContent() {
   const router = useRouter();
   const { toast } = useToast();
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
-  const [accessToken, setAccessToken] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     const requestToken = searchParams.get('request_token');
-    const state = searchParams.get('state');
     const error = searchParams.get('error');
+    const errorDescription = searchParams.get('error_description');
 
     if (error) {
+      setErrorMessage(errorDescription || error);
       setStatus('error');
       return;
     }
 
     if (!requestToken) {
+      setErrorMessage('No request_token found in the redirect URL');
       setStatus('error');
       return;
     }
@@ -37,30 +38,22 @@ function CallbackContent() {
         if (data.error) {
           throw new Error(data.error);
         }
-        if (data.access_token) {
-          setAccessToken(data.access_token);
+        if (data.success || data.hasAccessToken) {
           setStatus('success');
+          toast({
+            title: 'Success!',
+            description: 'Your Paytm Money account has been connected',
+          });
         } else {
-          throw new Error('No access token in response');
+          throw new Error('Unexpected response from server');
         }
       })
       .catch(err => {
         console.error('Token exchange error:', err);
+        setErrorMessage(err.message || 'Failed to exchange token');
         setStatus('error');
       });
-  }, [searchParams]);
-
-  const copyToClipboard = () => {
-    if (accessToken) {
-      navigator.clipboard.writeText(accessToken);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-      toast({
-        title: 'Copied!',
-        description: 'Access token copied to clipboard',
-      });
-    }
-  };
+  }, [searchParams, toast]);
 
   const goBack = () => {
     router.push('/paytm-portfolio');
@@ -70,7 +63,7 @@ function CallbackContent() {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
         <Loader2 className="h-12 w-12 animate-spin text-primary" />
-        <p className="text-muted-foreground">Exchanging token...</p>
+        <p className="text-muted-foreground">Connecting your account...</p>
       </div>
     );
   }
@@ -81,11 +74,11 @@ function CallbackContent() {
         <CardContent className="flex flex-col items-center justify-center py-8">
           <AlertCircle className="h-12 w-12 text-destructive mb-4" />
           <h3 className="text-lg font-semibold">Authentication Failed</h3>
-          <p className="text-sm text-muted-foreground text-center mt-2">
-            {searchParams.get('error') || 'No request token found in the redirect URL. Please try again.'}
+          <p className="text-sm text-muted-foreground text-center mt-2 max-w-sm">
+            {errorMessage || 'An error occurred during authentication'}
           </p>
           <Button onClick={goBack} className="mt-4">
-            Go Back
+            Go Back to Portfolio
           </Button>
         </CardContent>
       </Card>
@@ -93,45 +86,24 @@ function CallbackContent() {
   }
 
   return (
-    <Card className="border-green-500/50 max-w-lg mx-auto">
+    <Card className="border-green-500/50 max-w-md mx-auto">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-green-600">
           <CheckCircle className="h-6 w-6" />
-          Authentication Successful!
+          Account Connected!
         </CardTitle>
         <CardDescription>
-          Your Paytm Money account has been connected
+          Your Paytm Money account has been successfully linked
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="p-4 bg-muted rounded-lg space-y-2">
-          <p className="text-sm font-medium">Add this to your .env file:</p>
-          <div className="relative">
-            <code className="block p-3 bg-background rounded border text-xs break-all font-mono">
-              PAYTM_ACCESS_TOKEN={accessToken}
-            </code>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="absolute top-2 right-2"
-              onClick={copyToClipboard}
-            >
-              {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
-            </Button>
-          </div>
-        </div>
-        <div className="flex gap-2">
-          <Button onClick={copyToClipboard} variant="outline" className="flex-1">
-            {copied ? <Check className="mr-2 h-4 w-4" /> : <Copy className="mr-2 h-4 w-4" />}
-            Copy Token
-          </Button>
-          <Button onClick={goBack} className="flex-1">
-            Back to Portfolio
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          After adding the token to .env, restart your dev server and refresh the portfolio page.
+        <p className="text-sm text-muted-foreground">
+          Your access token has been securely stored in the database.
+          You can now view your portfolio.
         </p>
+        <Button onClick={goBack} className="w-full">
+          View My Portfolio
+        </Button>
       </CardContent>
     </Card>
   );

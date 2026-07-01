@@ -13,36 +13,11 @@ function log(level: 'INFO' | 'DEBUG' | 'ERROR' | 'WARN', message: string, data?:
   console.log(JSON.stringify(logEntry));
 }
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const PAYTM_API_KEY = process.env.PAYTM_MONEY_API_KEY;
-const PAYTM_SECRET = process.env.PAYTM_MONEY_SECRET;
-const PAYTM_ACCESS_TOKEN = process.env.PAYTM_ACCESS_TOKEN;
+// MCP URL - credentials are stored in Supabase secrets
 const PAYTM_MCP_URL = process.env.PAYTM_MCP_URL || 'https://kkzurvqbtguldcppujtn.supabase.co/functions/v1/paytm-mcp';
 
-// Check if a value is a placeholder
-function isPlaceholder(value: string | undefined): boolean {
-  if (!value) return true;
-  const placeholderPatterns = [
-    'your_',
-    'placeholder',
-    'xxx',
-    'test_',
-    'sample_',
-  ];
-  return placeholderPatterns.some(p => value.toLowerCase().startsWith(p));
-}
-
-const hasRealApiKey = !!PAYTM_API_KEY && !isPlaceholder(PAYTM_API_KEY);
-const hasRealSecret = !!PAYTM_SECRET && !isPlaceholder(PAYTM_SECRET);
-const hasRealAccessToken = !!PAYTM_ACCESS_TOKEN && !isPlaceholder(PAYTM_ACCESS_TOKEN);
-
-log('INFO', 'API route initialized', {
-  hasGeminiKey: !!GEMINI_API_KEY && !isPlaceholder(GEMINI_API_KEY),
-  hasPaytmApiKey: hasRealApiKey,
-  hasPaytmSecret: hasRealSecret,
-  hasPaytmAccessToken: hasRealAccessToken,
-  mcpUrl: PAYTM_MCP_URL,
-});
+// Gemini API key is still needed locally for AI insights (or we can get it from environment)
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 interface Holding {
   trading_symbol: string;
@@ -64,22 +39,9 @@ interface PortfolioSummary {
   holdings: Holding[];
 }
 
+// Call MCP API (credentials are in Supabase secrets)
 async function callMCPApi(action: string, params?: Record<string, string>): Promise<any> {
-  log('INFO', `Calling MCP API with action: ${action}`);
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-
-  if (PAYTM_API_KEY) {
-    headers['X-Paytm-Api-Key'] = PAYTM_API_KEY;
-  }
-  if (PAYTM_SECRET) {
-    headers['X-Paytm-Secret'] = PAYTM_SECRET;
-  }
-  if (PAYTM_ACCESS_TOKEN) {
-    headers['X-Paytm-Access-Token'] = PAYTM_ACCESS_TOKEN;
-  }
+  log('INFO', `Calling MCP API: ${action}`);
 
   let url = `${PAYTM_MCP_URL}?action=${action}`;
   if (params) {
@@ -88,22 +50,17 @@ async function callMCPApi(action: string, params?: Record<string, string>): Prom
     }
   }
 
-  log('DEBUG', 'MCP API request', { url, action });
-
   const response = await fetch(url, {
     method: 'GET',
-    headers,
+    headers: { 'Content-Type': 'application/json' },
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    log('ERROR', `MCP API failed with status ${response.status}`, { error: errorText });
     throw new Error(`MCP API error: ${response.status} - ${errorText}`);
   }
 
   const data = await response.json();
-  log('DEBUG', 'MCP API response received', { action, hasError: !!data.error });
-
   if (data.error) {
     throw new Error(data.error);
   }
@@ -111,22 +68,9 @@ async function callMCPApi(action: string, params?: Record<string, string>): Prom
   return data;
 }
 
+// Call MCP tool
 async function callMCPTool(toolName: string, args?: Record<string, any>): Promise<any> {
   log('INFO', `Calling MCP tool: ${toolName}`);
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-
-  if (PAYTM_API_KEY) {
-    headers['X-Paytm-Api-Key'] = PAYTM_API_KEY;
-  }
-  if (PAYTM_SECRET) {
-    headers['X-Paytm-Secret'] = PAYTM_SECRET;
-  }
-  if (PAYTM_ACCESS_TOKEN) {
-    headers['X-Paytm-Access-Token'] = PAYTM_ACCESS_TOKEN;
-  }
 
   const requestBody = {
     jsonrpc: '2.0',
@@ -138,24 +82,20 @@ async function callMCPTool(toolName: string, args?: Record<string, any>): Promis
     },
   };
 
-  log('DEBUG', 'MCP tool request', { tool: toolName });
-
-  const response = await fetch(`${PAYTM_MCP_URL}`, {
+  const response = await fetch(PAYTM_MCP_URL, {
     method: 'POST',
-    headers,
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    log('ERROR', `MCP call failed with status ${response.status}`, { error: errorText });
     throw new Error(`MCP call failed: ${response.status} - ${errorText}`);
   }
 
   const data = await response.json();
 
   if (data.error) {
-    log('ERROR', 'MCP tool returned error', { error: data.error });
     throw new Error(data.error.message);
   }
 
@@ -171,12 +111,10 @@ async function callMCPTool(toolName: string, args?: Record<string, any>): Promis
   return data.result;
 }
 
+// Generate AI insights
 async function generateInsights(portfolioData: PortfolioSummary): Promise<string> {
-  log('INFO', 'Generating AI insights with Gemini');
-
-  if (!GEMINI_API_KEY || isPlaceholder(GEMINI_API_KEY)) {
-    log('WARN', 'Gemini API key not configured');
-    return 'Gemini API key not configured. Cannot generate insights.';
+  if (!GEMINI_API_KEY) {
+    return 'Gemini API key not configured. Add GEMINI_API_KEY to .env for AI insights.';
   }
 
   const prompt = `Analyze this stock portfolio and provide insights:
@@ -196,17 +134,18 @@ Provide a brief analysis including:
 3. Risk assessment
 4. Recommendations`;
 
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`;
-
   try {
-    const response = await fetch(geminiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
-      }),
-    });
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.7, maxOutputTokens: 1024 },
+        }),
+      }
+    );
 
     if (!response.ok) {
       throw new Error(`Gemini API error: ${response.status}`);
@@ -228,60 +167,35 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const action = searchParams.get('action');
 
-    log('INFO', 'Processing request', { requestId, action });
-
-    // Check connectivity status
+    // Status check - credentials come from Supabase secrets
     if (action === 'status') {
-      let mcpStatus: any = { connected: false };
-
-      // Only check MCP status if we have real credentials
-      if (hasRealApiKey && hasRealSecret) {
-        try {
-          mcpStatus = await callMCPApi('status');
-        } catch (e) {
-          log('WARN', 'MCP status check failed', { error: e });
-        }
+      try {
+        const status = await callMCPApi('status');
+        return NextResponse.json({
+          ...status,
+          geminiKeyConfigured: !!GEMINI_API_KEY,
+        });
+      } catch (e) {
+        return NextResponse.json({
+          connected: false,
+          hasAccessToken: false,
+          apiKeyConfigured: false,
+          secretConfigured: false,
+          geminiKeyConfigured: !!GEMINI_API_KEY,
+          error: e instanceof Error ? e.message : 'Failed to connect to MCP server',
+        });
       }
-
-      const status = {
-        connected: hasRealApiKey && hasRealSecret,
-        hasAccessToken: hasRealAccessToken,
-        apiKeyConfigured: hasRealApiKey,
-        secretConfigured: hasRealSecret,
-        localApiKeyConfigured: !!PAYTM_API_KEY,
-        localSecretConfigured: !!PAYTM_SECRET,
-        localAccessTokenConfigured: hasRealAccessToken,
-        geminiKeyConfigured: !!GEMINI_API_KEY && !isPlaceholder(GEMINI_API_KEY),
-        timestamp: new Date().toISOString(),
-      };
-
-      return NextResponse.json({ ...status, ...mcpStatus });
     }
 
-    // Get OAuth login URL - redirect directly to Paytm login
+    // Get OAuth login URL
     if (action === 'login_url') {
-      if (!hasRealApiKey) {
-        return NextResponse.json({
-          error: 'API Key not configured. Please set PAYTM_MONEY_API_KEY in .env',
-        }, { status: 400 });
-      }
-
       const state = searchParams.get('state') || Date.now().toString();
-      const redirectUrl = searchParams.get('redirect') || `${request.nextUrl.origin}/paytm-portfolio/callback`;
-
-      // Generate the Paytm login URL
-      const loginUrl = `https://login.paytmmoney.com/merchant-login?apiKey=${encodeURIComponent(PAYTM_API_KEY!)}&state=${encodeURIComponent(state)}`;
-
-      log('INFO', 'Generated login URL', { loginUrl, redirectUrl });
-
-      // Return redirect to login URL
-      // Note: User needs to configure their redirect URL in Paytm developer portal
-      return NextResponse.json({
-        login_url: loginUrl,
-        redirect_url: redirectUrl,
-        instructions: '1. Click the login URL\n2. Authenticate with Paytm Money\n3. You will be redirected to your configured redirect URL with request_token',
-        note: `Make sure your Paytm app redirect URL is set to: ${redirectUrl}`,
-      });
+      try {
+        const data = await callMCPApi('login_url', { state });
+        return NextResponse.json(data);
+      } catch (e: any) {
+        return NextResponse.json({ error: e.message }, { status: 500 });
+      }
     }
 
     // Exchange request token for access token
@@ -291,35 +205,16 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ error: 'request_token parameter required' }, { status: 400 });
       }
 
-      if (!hasRealApiKey || !hasRealSecret) {
-        return NextResponse.json({ error: 'API Key and Secret not configured' }, { status: 400 });
-      }
-
       try {
-        const tokenData = await callMCPApi('exchange_token', { request_token: requestToken });
-        return NextResponse.json(tokenData);
-      } catch (error: any) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        const data = await callMCPApi('exchange_token', { request_token: requestToken });
+        return NextResponse.json(data);
+      } catch (e: any) {
+        return NextResponse.json({ error: e.message }, { status: 500 });
       }
     }
 
     // Get portfolio data
     if (action === 'portfolio') {
-      if (!hasRealAccessToken) {
-        log('WARN', 'Access token not configured - OAuth required');
-        return NextResponse.json({
-          error: 'OAuth access token required. Complete the OAuth flow first.',
-          oauthRequired: true,
-          instructions: [
-            '1. Use ?action=login_url to get OAuth login URL',
-            '2. Login with Paytm Money credentials',
-            '3. Get request_token from redirect URL',
-            '4. Use ?action=exchange_token&request_token=TOKEN',
-            '5. Add received access_token to .env as PAYTM_ACCESS_TOKEN',
-          ],
-        }, { status: 503 });
-      }
-
       log('INFO', 'Fetching portfolio data', { requestId });
 
       try {
@@ -338,8 +233,6 @@ export async function GET(request: NextRequest) {
           current_value: (h.quantity * h.last_price) || h.current_value || h.valuation_price * h.quantity || 0,
           investment_value: (h.quantity * h.average_price) || h.investment_value || 0,
         }));
-
-        log('INFO', 'Holdings transformed', { requestId, holdingCount: holdings.length });
 
         const totalInvestment = holdings.reduce((sum, h) => sum + h.investment_value, 0);
         const totalCurrentValue = holdings.reduce((sum, h) => sum + h.current_value, 0);
@@ -361,14 +254,12 @@ export async function GET(request: NextRequest) {
           insights,
           lastUpdated: new Date().toISOString(),
         });
-      } catch (mcpError) {
-        log('ERROR', 'MCP Tool call error', {
-          requestId,
-          error: mcpError instanceof Error ? mcpError.message : String(mcpError),
-        });
+      } catch (mcpError: any) {
+        log('ERROR', 'MCP Tool call error', { requestId, error: mcpError.message });
         return NextResponse.json({
-          error: mcpError instanceof Error ? mcpError.message : 'Failed to fetch portfolio data',
-        }, { status: 500 });
+          error: mcpError.message,
+          oauthRequired: mcpError.message.includes('access token'),
+        }, { status: mcpError.message.includes('access token') ? 503 : 500 });
       }
     }
 
@@ -382,7 +273,6 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(userData);
     }
 
-    log('WARN', 'Invalid action requested', { requestId, action });
     return NextResponse.json({
       error: 'Invalid action. Use: status, login_url, exchange_token, portfolio, value, or user',
     }, { status: 400 });

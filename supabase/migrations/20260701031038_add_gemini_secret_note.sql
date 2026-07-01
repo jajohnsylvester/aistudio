@@ -1,0 +1,4 @@
+-- Add GEMINI_API_KEY to the list of secrets needed
+-- This is just a documentation note - secrets are added via Supabase Dashboard
+-- Go to: Project Settings → Edge Functions → Secrets Management
+-- Add: GEMINI_API_KEY with your Gemini API key value

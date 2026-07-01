@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown, AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key, Copy, Check, Settings } from 'lucide-react';
+import { Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown, AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key, Shield } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
@@ -14,9 +14,6 @@ interface MCPStatus {
   hasAccessToken: boolean;
   apiKeyConfigured: boolean;
   secretConfigured: boolean;
-  localAccessTokenConfigured?: boolean;
-  localApiKeyConfigured?: boolean;
-  localSecretConfigured?: boolean;
   geminiKeyConfigured?: boolean;
   timestamp?: string;
   error?: string;
@@ -43,6 +40,7 @@ interface PortfolioData {
   insights: string;
   lastUpdated: string;
   error?: string;
+  oauthRequired?: boolean;
 }
 
 export default function PaytmPortfolioPage() {
@@ -50,21 +48,12 @@ export default function PaytmPortfolioPage() {
   const [portfolio, setPortfolio] = useState<PortfolioData | null>(null);
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(false);
-  const [copied, setCopied] = useState(false);
   const { toast } = useToast();
-
-  // Check if running locally with placeholder values
-  const hasRealApiKeys = status?.localApiKeyConfigured && status?.apiKeyConfigured;
-  const hasRealSecret = status?.localSecretConfigured && status?.secretConfigured;
-  const hasAccessToken = status?.hasAccessToken || status?.localAccessTokenConfigured;
 
   const checkStatus = useCallback(async () => {
     setIsLoadingStatus(true);
     try {
       const response = await fetch('/api/paytm-portfolio?action=status');
-      if (!response.ok) {
-        throw new Error('Failed to check status');
-      }
       const data = await response.json();
       setStatus(data);
     } catch (error) {
@@ -85,12 +74,15 @@ export default function PaytmPortfolioPage() {
     setIsLoadingPortfolio(true);
     try {
       const response = await fetch('/api/paytm-portfolio?action=portfolio');
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to fetch portfolio');
-      }
       const data = await response.json();
       setPortfolio(data);
+
+      if (data.oauthRequired) {
+        toast({
+          title: 'OAuth Required',
+          description: 'Please login with Paytm Money to view your portfolio',
+        });
+      }
     } catch (error) {
       console.error('Portfolio fetch error:', error);
       toast({
@@ -103,34 +95,26 @@ export default function PaytmPortfolioPage() {
     }
   }, [toast]);
 
-  const getLoginUrl = () => {
-    if (!status?.apiKeyConfigured) {
+  const startOAuthFlow = async () => {
+    try {
+      const response = await fetch('/api/paytm-portfolio?action=login_url');
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      if (data.login_url) {
+        // Open login in new window - user will be redirected to callback
+        window.open(data.login_url, '_blank');
+      }
+    } catch (error) {
       toast({
         variant: 'destructive',
-        title: 'API Key Not Configured',
-        description: 'Please set PAYTM_MONEY_API_KEY in your .env file first',
+        title: 'Error',
+        description: error instanceof Error ? error.message : 'Failed to get login URL',
       });
-      return;
     }
-
-    const state = Date.now().toString();
-    const apiKey = 'YOUR_API_KEY_PLACEHOLDER'; // Will be replaced server-side
-
-    // Open login in new window
-    window.open(
-      `/api/paytm-portfolio?action=login_url&state=${state}&redirect=${encodeURIComponent(window.location.origin + '/paytm-portfolio/callback')}`,
-      '_blank'
-    );
-  };
-
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-    toast({
-      title: 'Copied!',
-      description: 'Access token copied to clipboard',
-    });
   };
 
   useEffect(() => {
@@ -138,10 +122,10 @@ export default function PaytmPortfolioPage() {
   }, [checkStatus]);
 
   useEffect(() => {
-    if (hasAccessToken) {
+    if (status?.hasAccessToken) {
       fetchPortfolio();
     }
-  }, [hasAccessToken, fetchPortfolio]);
+  }, [status?.hasAccessToken, fetchPortfolio]);
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-IN', {
@@ -171,7 +155,7 @@ export default function PaytmPortfolioPage() {
           variant="outline"
           onClick={() => {
             checkStatus();
-            if (hasAccessToken) {
+            if (status?.hasAccessToken) {
               fetchPortfolio();
             }
           }}
@@ -186,7 +170,7 @@ export default function PaytmPortfolioPage() {
         </Button>
       </div>
 
-      {/* MCP Connectivity Status Card */}
+      {/* Status Card */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -194,7 +178,7 @@ export default function PaytmPortfolioPage() {
             Server Status
           </CardTitle>
           <CardDescription>
-            Paytm Money API connection status
+            Credentials are securely stored in Supabase secrets
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -203,104 +187,119 @@ export default function PaytmPortfolioPage() {
               <Loader2 className="h-8 w-8 animate-spin text-primary" />
             </div>
           ) : (
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="flex items-center gap-2">
-                {hasRealApiKeys ? (
-                  <CheckCircle className="h-5 w-5 text-green-500" />
-                ) : (
-                  <AlertCircle className="h-5 w-5 text-destructive" />
-                )}
-                <div>
-                  <p className="text-sm font-medium">API Key</p>
-                  <p className={`text-xs ${hasRealApiKeys ? 'text-green-600' : 'text-destructive'}`}>
-                    {hasRealApiKeys ? 'Configured' : 'Not Set'}
-                  </p>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="flex items-center gap-2">
+                  {status?.apiKeyConfigured ? (
+                    <CheckCircle className="h-5 w-5 text-green-500" />
+                  ) : (
+                    <AlertCircle className="h-5 w-5 text-destructive" />
+                  )}
+                  <div>
+                    <p className="text-sm font-medium">API Key</p>
+                    <p className={`text-xs ${status?.apiKeyConfigured ? 'text-green-600' : 'text-destructive'}`}>
+                      {status?.apiKeyConfigured ? 'Secured' : 'Missing'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {status?.secretConfigured ? (
+                    <CheckCircle className="h-5 w-5 text-green-500" />
+                  ) : (
+                    <AlertCircle className="h-5 w-5 text-destructive" />
+                  )}
+                  <div>
+                    <p className="text-sm font-medium">API Secret</p>
+                    <p className={`text-xs ${status?.secretConfigured ? 'text-green-600' : 'text-destructive'}`}>
+                      {status?.secretConfigured ? 'Secured' : 'Missing'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {status?.hasAccessToken ? (
+                    <CheckCircle className="h-5 w-5 text-green-500" />
+                  ) : (
+                    <AlertCircle className="h-5 w-5 text-yellow-500" />
+                  )}
+                  <div>
+                    <p className="text-sm font-medium">Access Token</p>
+                    <p className={`text-xs ${status?.hasAccessToken ? 'text-green-600' : 'text-yellow-600'}`}>
+                      {status?.hasAccessToken ? 'Active' : 'OAuth Required'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {status?.geminiKeyConfigured ? (
+                    <CheckCircle className="h-5 w-5 text-green-500" />
+                  ) : (
+                    <AlertCircle className="h-5 w-5 text-yellow-500" />
+                  )}
+                  <div>
+                    <p className="text-sm font-medium">Gemini AI</p>
+                    <p className={`text-xs ${status?.geminiKeyConfigured ? 'text-green-600' : 'text-yellow-600'}`}>
+                      {status?.geminiKeyConfigured ? 'Configured' : 'Optional'}
+                    </p>
+                  </div>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                {hasRealSecret ? (
-                  <CheckCircle className="h-5 w-5 text-green-500" />
-                ) : (
-                  <AlertCircle className="h-5 w-5 text-destructive" />
-                )}
-                <div>
-                  <p className="text-sm font-medium">API Secret</p>
-                  <p className={`text-xs ${hasRealSecret ? 'text-green-600' : 'text-destructive'}`}>
-                    {hasRealSecret ? 'Configured' : 'Not Set'}
+              {status?.apiKeyConfigured && status?.secretConfigured && (
+                <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-950 rounded-lg">
+                  <Shield className="h-4 w-4 text-green-600 flex-shrink-0" />
+                  <p className="text-xs text-green-700 dark:text-green-400">
+                    API credentials are securely stored in Supabase Edge Function secrets
                   </p>
                 </div>
-              </div>
+              )}
 
-              <div className="flex items-center gap-2">
-                {hasAccessToken ? (
-                  <CheckCircle className="h-5 w-5 text-green-500" />
-                ) : (
-                  <AlertCircle className="h-5 w-5 text-yellow-500" />
-                )}
-                <div>
-                  <p className="text-sm font-medium">Access Token</p>
-                  <p className={`text-xs ${hasAccessToken ? 'text-green-600' : 'text-yellow-600'}`}>
-                    {hasAccessToken ? 'Active' : 'OAuth Required'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {status?.geminiKeyConfigured ? (
-                  <CheckCircle className="h-5 w-5 text-green-500" />
-                ) : (
-                  <AlertCircle className="h-5 w-5 text-yellow-500" />
-                )}
-                <div>
-                  <p className="text-sm font-medium">Gemini AI</p>
-                  <p className={`text-xs ${status?.geminiKeyConfigured ? 'text-green-600' : 'text-yellow-600'}`}>
-                    {status?.geminiKeyConfigured ? 'Configured' : 'Optional'}
-                  </p>
-                </div>
-              </div>
+              {status?.timestamp && (
+                <p className="text-xs text-muted-foreground">
+                  Last checked: {new Date(status.timestamp).toLocaleString()}
+                </p>
+              )}
             </div>
-          )}
-          {status?.timestamp && (
-            <p className="text-xs text-muted-foreground mt-4">
-              Last checked: {new Date(status.timestamp).toLocaleString()}
-            </p>
           )}
         </CardContent>
       </Card>
 
-      {/* Setup Instructions - shown when API keys are missing */}
-      {(!hasRealApiKeys || !hasRealSecret) && !isLoadingStatus && (
+      {/* Credentials Missing */}
+      {status && (!status.apiKeyConfigured || !status.secretConfigured) && !isLoadingStatus && (
         <Card className="border-destructive">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Settings className="h-5 w-5 text-destructive" />
+              <AlertCircle className="h-5 w-5 text-destructive" />
               Setup Required
             </CardTitle>
-            <CardDescription>
-              Configure your Paytm Money API credentials
-            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              Update your <code>.env</code> file with actual values (not placeholders):
+              Paytm Money API credentials need to be configured in Supabase secrets:
             </p>
-            <div className="bg-muted p-4 rounded-lg space-y-2 font-mono text-sm">
-              <p><span className="text-muted-foreground"># Get from:</span> <a href="https://developer.paytmmoney.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">developer.paytmmoney.com</a></p>
-              <p>PAYTM_MONEY_API_KEY=<span className="text-red-500">your_actual_api_key_here</span></p>
-              <p>PAYTM_MONEY_SECRET=<span className="text-red-500">your_actual_secret_here</span></p>
-              <p className="text-muted-foreground"># For AI insights:</p>
-              <p>GEMINI_API_KEY=<span className="text-red-500">your_gemini_key_here</span></p>
+            <div className="bg-muted p-4 rounded-lg space-y-2 text-sm">
+              <p className="font-medium">Add these secrets in Supabase Dashboard:</p>
+              <ul className="ml-4 space-y-1 list-disc">
+                <li><code>PAYTM_MONEY_API_KEY</code> - Your Paytm API key</li>
+                <li><code>PAYTM_MONEY_SECRET</code> - Your Paytm API secret</li>
+              </ul>
+              <p className="text-muted-foreground text-xs mt-2">
+                Dashboard: Project Settings → Edge Functions → Secrets Management
+              </p>
             </div>
-            <p className="text-xs text-muted-foreground">
-              After updating .env, restart your development server.
-            </p>
+            <Button asChild>
+              <a href="https://supabase.com/dashboard" target="_blank" rel="noopener noreferrer">
+                <ExternalLink className="mr-2 h-4 w-4" />
+                Open Supabase Dashboard
+              </a>
+            </Button>
           </CardContent>
         </Card>
       )}
 
-      {/* OAuth Setup Card - shown when API keys are set but access token is missing */}
-      {hasRealApiKeys && hasRealSecret && !hasAccessToken && !isLoadingStatus && (
+      {/* OAuth Required */}
+      {status?.apiKeyConfigured && status?.secretConfigured && !status.hasAccessToken && !isLoadingStatus && (
         <Card className="border-yellow-500/50">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -313,25 +312,26 @@ export default function PaytmPortfolioPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              Click the button below to login with your Paytm Money account. After successful authentication, you'll receive an access token.
+              Click the button below to login with your Paytm Money account.
+              After authentication, your access token will be securely stored.
             </p>
-            <Button onClick={getLoginUrl} className="w-full" size="lg">
+            <Button onClick={startOAuthFlow} className="w-full" size="lg">
               <ExternalLink className="mr-2 h-4 w-4" />
               Login with Paytm Money
             </Button>
             <div className="bg-muted p-3 rounded-lg text-xs text-muted-foreground">
               <p className="font-medium mb-1">How it works:</p>
               <ol className="list-decimal list-inside space-y-1">
-                <li>Click "Login with Paytm Money" button</li>
-                <li>Enter your Paytm Money credentials (phone, password, OTP)</li>
-                <li>After login, you'll be redirected back with your access token</li>
-                <li>Copy the token and add to .env as PAYTM_ACCESS_TOKEN</li>
+                <li>Click "Login with Paytm Money"</li>
+                <li>Enter your Paytm Money credentials</li>
+                <li>Access token is saved securely</li>
+                <li>Your portfolio loads automatically</li>
               </ol>
             </div>
             <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-950 rounded-lg">
               <AlertCircle className="h-4 w-4 text-blue-600 flex-shrink-0" />
               <p className="text-xs text-blue-700 dark:text-blue-400">
-                Make sure your Paytm Money app's redirect URL is set to: <code className="break-all">{typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000'}/paytm-portfolio/callback</code>
+                Make sure your redirect URL in Paytm developer portal includes: <code>{typeof window !== 'undefined' ? window.location.origin : ''}/paytm-portfolio/callback</code>
               </p>
             </div>
           </CardContent>
@@ -339,7 +339,7 @@ export default function PaytmPortfolioPage() {
       )}
 
       {/* Portfolio Summary */}
-      {hasAccessToken && portfolio && (
+      {status?.hasAccessToken && portfolio && (
         <>
           <div className="grid gap-4 md:grid-cols-4">
             <Card>
@@ -347,9 +347,7 @@ export default function PaytmPortfolioPage() {
                 <CardTitle className="text-sm font-medium">Total Investment</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold">
-                  {formatCurrency(portfolio.totalInvestment)}
-                </div>
+                <div className="text-2xl font-bold">{formatCurrency(portfolio.totalInvestment)}</div>
               </CardContent>
             </Card>
 
@@ -358,9 +356,7 @@ export default function PaytmPortfolioPage() {
                 <CardTitle className="text-sm font-medium">Current Value</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold">
-                  {formatCurrency(portfolio.totalCurrentValue)}
-                </div>
+                <div className="text-2xl font-bold">{formatCurrency(portfolio.totalCurrentValue)}</div>
               </CardContent>
             </Card>
 
@@ -390,9 +386,7 @@ export default function PaytmPortfolioPage() {
                 <CardTitle className="text-sm font-medium">Holdings Count</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold">
-                  {portfolio.holdings?.length || 0}
-                </div>
+                <div className="text-2xl font-bold">{portfolio.holdings?.length || 0}</div>
                 <p className="text-sm text-muted-foreground">stocks</p>
               </CardContent>
             </Card>
@@ -406,9 +400,7 @@ export default function PaytmPortfolioPage() {
                   <Lightbulb className="h-5 w-5 text-yellow-500" />
                   AI Portfolio Insights
                 </CardTitle>
-                <CardDescription>
-                  Powered by Gemini AI
-                </CardDescription>
+                <CardDescription>Powered by Gemini AI</CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="prose prose-sm max-w-none dark:prose-invert">
@@ -422,9 +414,7 @@ export default function PaytmPortfolioPage() {
           <Card>
             <CardHeader>
               <CardTitle>Your Holdings</CardTitle>
-              <CardDescription>
-                Your stock portfolio from Paytm Money
-              </CardDescription>
+              <CardDescription>Your stock portfolio from Paytm Money</CardDescription>
             </CardHeader>
             <CardContent>
               {portfolio.holdings?.length === 0 ? (
@@ -449,32 +439,16 @@ export default function PaytmPortfolioPage() {
                     <TableBody>
                       {portfolio.holdings?.map((holding, index) => (
                         <TableRow key={index}>
-                          <TableCell className="font-medium">
-                            {holding.trading_symbol}
-                          </TableCell>
-                          <TableCell>
-                            <Badge variant="outline">{holding.exchange}</Badge>
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {holding.quantity}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {formatCurrency(holding.average_price)}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {formatCurrency(holding.last_price)}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {formatCurrency(holding.investment_value)}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            {formatCurrency(holding.current_value)}
-                          </TableCell>
+                          <TableCell className="font-medium">{holding.trading_symbol}</TableCell>
+                          <TableCell><Badge variant="outline">{holding.exchange}</Badge></TableCell>
+                          <TableCell className="text-right">{holding.quantity}</TableCell>
+                          <TableCell className="text-right">{formatCurrency(holding.average_price)}</TableCell>
+                          <TableCell className="text-right">{formatCurrency(holding.last_price)}</TableCell>
+                          <TableCell className="text-right">{formatCurrency(holding.investment_value)}</TableCell>
+                          <TableCell className="text-right">{formatCurrency(holding.current_value)}</TableCell>
                           <TableCell className={`text-right font-medium ${holding.pnl >= 0 ? 'text-green-600' : 'text-destructive'}`}>
                             <div>{formatCurrency(holding.pnl)}</div>
-                            <div className="text-xs">
-                              {formatPercent(holding.pnl_percent)}
-                            </div>
+                            <div className="text-xs">{formatPercent(holding.pnl_percent)}</div>
                           </TableCell>
                         </TableRow>
                       ))}
