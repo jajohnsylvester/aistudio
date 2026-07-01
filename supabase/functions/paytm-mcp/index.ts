@@ -221,12 +221,39 @@ async function callPaytmAPI(endpoint: string, accessToken: string, method: strin
 
   if (!response.ok) {
     const errorText = await response.text();
+    let errorMessage = `Paytm API error: ${response.status}`;
+
+    try {
+      const errorJson = JSON.parse(errorText);
+      if (errorJson.message) {
+        errorMessage = errorJson.message;
+      } else if (errorJson.error_code) {
+        errorMessage = `${errorJson.error_code}: ${errorJson.message || 'Unknown error'}`;
+      }
+    } catch {
+      // If not JSON, use the raw text
+      if (errorText) {
+        errorMessage = errorText;
+      }
+    }
+
+    // Handle specific error codes
+    if (response.status === 400) {
+      errorMessage = 'Invalid request. The access token may be expired or invalid. Please re-authenticate.';
+    } else if (response.status === 401) {
+      errorMessage = 'Authentication failed. Your session has expired. Please login again.';
+    } else if (response.status === 403) {
+      errorMessage = 'Access denied. Please check your API permissions.';
+    } else if (response.status === 429) {
+      errorMessage = 'Rate limit exceeded. Please try again later.';
+    }
+
     log('ERROR', 'Paytm API error', {
       status: response.status,
       responseBody: errorText,
       endpoint,
     });
-    throw new Error(`Paytm API error: ${response.status} - ${errorText}`);
+    throw new Error(errorMessage);
   }
 
   return await response.json();

@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown, AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key, Shield } from 'lucide-react';
+import { Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown, AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key, Shield, RefreshCcw } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
@@ -46,6 +46,7 @@ interface PortfolioData {
 export default function PaytmPortfolioPage() {
   const [status, setStatus] = useState<MCPStatus | null>(null);
   const [portfolio, setPortfolio] = useState<PortfolioData | null>(null);
+  const [portfolioError, setPortfolioError] = useState<string | null>(null);
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(false);
   const { toast } = useToast();
@@ -72,23 +73,40 @@ export default function PaytmPortfolioPage() {
 
   const fetchPortfolio = useCallback(async () => {
     setIsLoadingPortfolio(true);
+    setPortfolioError(null);
     try {
       const response = await fetch('/api/paytm-portfolio?action=portfolio');
       const data = await response.json();
-      setPortfolio(data);
 
-      if (data.oauthRequired) {
-        toast({
-          title: 'OAuth Required',
-          description: 'Please login with Paytm Money to view your portfolio',
-        });
+      if (data.error) {
+        setPortfolioError(data.error);
+        setPortfolio(null);
+
+        if (data.oauthRequired) {
+          toast({
+            title: 'OAuth Required',
+            description: 'Please login with Paytm Money to view your portfolio',
+          });
+        } else {
+          toast({
+            variant: 'destructive',
+            title: 'Error Loading Portfolio',
+            description: data.error,
+          });
+        }
+      } else {
+        setPortfolio(data);
+        setPortfolioError(null);
       }
     } catch (error) {
       console.error('Portfolio fetch error:', error);
+      const errorMsg = error instanceof Error ? error.message : 'Failed to fetch portfolio data';
+      setPortfolioError(errorMsg);
+      setPortfolio(null);
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to fetch portfolio data',
+        description: errorMsg,
       });
     } finally {
       setIsLoadingPortfolio(false);
@@ -105,7 +123,6 @@ export default function PaytmPortfolioPage() {
       }
 
       if (data.login_url) {
-        // Open login in new window - user will be redirected to callback
         window.open(data.login_url, '_blank');
       }
     } catch (error) {
@@ -115,6 +132,16 @@ export default function PaytmPortfolioPage() {
         description: error instanceof Error ? error.message : 'Failed to get login URL',
       });
     }
+  };
+
+  const clearTokenAndReauth = async () => {
+    setPortfolioError(null);
+    setPortfolio(null);
+    setStatus(prev => prev ? { ...prev, hasAccessToken: false } : null);
+    toast({
+      title: 'Re-authentication Required',
+      description: 'Click "Login with Paytm Money" to generate a new access token',
+    });
   };
 
   useEffect(() => {
@@ -139,6 +166,13 @@ export default function PaytmPortfolioPage() {
     const sign = value >= 0 ? '+' : '';
     return `${sign}${value.toFixed(2)}%`;
   };
+
+  // Check if error indicates token issue
+  const isTokenError = portfolioError?.includes('400') ||
+                       portfolioError?.includes('401') ||
+                       portfolioError?.includes('token') ||
+                       portfolioError?.includes('session') ||
+                       portfolioError?.includes('PM_OPEN_API');
 
   return (
     <div className="flex flex-col gap-6">
@@ -218,15 +252,21 @@ export default function PaytmPortfolioPage() {
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {status?.hasAccessToken ? (
+                  {status?.hasAccessToken && !portfolioError ? (
                     <CheckCircle className="h-5 w-5 text-green-500" />
+                  ) : status?.hasAccessToken && portfolioError ? (
+                    <AlertCircle className="h-5 w-5 text-orange-500" />
                   ) : (
                     <AlertCircle className="h-5 w-5 text-yellow-500" />
                   )}
                   <div>
                     <p className="text-sm font-medium">Access Token</p>
-                    <p className={`text-xs ${status?.hasAccessToken ? 'text-green-600' : 'text-yellow-600'}`}>
-                      {status?.hasAccessToken ? 'Active' : 'OAuth Required'}
+                    <p className={`text-xs ${
+                      status?.hasAccessToken && !portfolioError ? 'text-green-600' :
+                      status?.hasAccessToken && portfolioError ? 'text-orange-600' : 'text-yellow-600'
+                    }`}>
+                      {status?.hasAccessToken && !portfolioError ? 'Active' :
+                       status?.hasAccessToken && portfolioError ? 'May be expired' : 'OAuth Required'}
                     </p>
                   </div>
                 </div>
@@ -338,8 +378,72 @@ export default function PaytmPortfolioPage() {
         </Card>
       )}
 
+      {/* Portfolio Error - Token expired or API error */}
+      {status?.hasAccessToken && portfolioError && !isLoadingPortfolio && (
+        <Card className="border-orange-500/50">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-orange-500" />
+              {isTokenError ? 'Session Expired' : 'Error Loading Portfolio'}
+            </CardTitle>
+            <CardDescription>
+              {isTokenError
+                ? 'Your access token may have expired. Please re-authenticate.'
+                : 'Unable to fetch your portfolio data'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="p-3 bg-muted rounded-lg">
+              <p className="text-sm font-medium mb-1">Error details:</p>
+              <p className="text-xs text-muted-foreground font-mono break-all">{portfolioError}</p>
+            </div>
+
+            {isTokenError ? (
+              <div className="space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  Paytm Money access tokens can expire. Click below to re-authenticate.
+                </p>
+                <div className="flex gap-2">
+                  <Button onClick={startOAuthFlow} className="flex-1">
+                    <RefreshCcw className="mr-2 h-4 w-4" />
+                    Re-authenticate
+                  </Button>
+                  <Button variant="outline" onClick={fetchPortfolio}>
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                    Retry
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <Button onClick={fetchPortfolio}>
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  Try Again
+                </Button>
+                <Button variant="outline" onClick={clearTokenAndReauth}>
+                  Re-authenticate
+                </Button>
+              </div>
+            )}
+
+            <div className="flex items-start gap-2 p-3 bg-blue-50 dark:bg-blue-950 rounded-lg">
+              <AlertCircle className="h-4 w-4 text-blue-600 flex-shrink-0 mt-0.5" />
+              <div className="text-xs text-blue-700 dark:text-blue-400">
+                <p className="font-medium mb-1">Common causes:</p>
+                <ul className="list-disc list-inside space-y-0.5">
+                  <li>Access token expired (valid for 24 hours)</li>
+                  <li>Session invalidated from another device</li>
+                  <li>API rate limit exceeded</li>
+                  <li>Market is closed (try during market hours)</li>
+                </ul>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Portfolio Summary */}
-      {status?.hasAccessToken && portfolio && (
+      {status?.hasAccessToken && portfolio && !portfolioError && (
         <>
           <div className="grid gap-4 md:grid-cols-4">
             <Card>
@@ -468,8 +572,9 @@ export default function PaytmPortfolioPage() {
 
       {/* Loading State */}
       {isLoadingPortfolio && (
-        <div className="flex items-center justify-center py-12">
+        <div className="flex flex-col items-center justify-center py-12 gap-3">
           <Loader2 className="h-12 w-12 animate-spin text-primary" />
+          <p className="text-muted-foreground">Loading your portfolio...</p>
         </div>
       )}
     </div>
