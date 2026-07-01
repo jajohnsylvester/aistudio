@@ -331,7 +331,7 @@ export default function PaytmPortfolioPage() {
             <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-950 rounded-lg">
               <AlertCircle className="h-4 w-4 text-blue-600 flex-shrink-0" />
               <p className="text-xs text-blue-700 dark:text-blue-400">
-                Make sure your redirect URL in Paytm developer portal includes: <code>{typeof window !== 'undefined' ? window.location.origin : ''}/paytm-portfolio/callback</code>
+                Make sure your redirect URL in Paytm developer portal is set to: <code className="break-all">{typeof window !== 'undefined' ? window.location.origin : ''}/auth/callback</code>
               </p>
             </div>
           </CardContent>
