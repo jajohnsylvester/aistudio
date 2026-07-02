@@ -75,8 +75,39 @@ function getApiCredentials() {
   return { apiKey, apiSecret };
 }
 
+// Decode JWT to check expiry (without verifying signature)
+function decodeJwtPayload(token: string): any | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = atob(parts[1].replace(/-/g, '+').replace(/_/g, '/'));
+    return JSON.parse(payload);
+  } catch {
+    return null;
+  }
+}
+
+// Check if token is expired
+function isTokenExpired(token: string): boolean {
+  const payload = decodeJwtPayload(token);
+  if (!payload || !payload.exp) return true;
+
+  const expiryTime = payload.exp * 1000; // Convert to milliseconds
+  const now = Date.now();
+  const bufferMs = 5 * 60 * 1000; // 5 minute buffer
+
+  return now >= (expiryTime - bufferMs);
+}
+
+// Get token expiry time
+function getTokenExpiryTime(token: string): Date | null {
+  const payload = decodeJwtPayload(token);
+  if (!payload || !payload.exp) return null;
+  return new Date(payload.exp * 1000);
+}
+
 // Get access token from database
-async function getAccessTokenFromDB(): Promise<{ accessToken: string | null; publicAccessToken: string | null; readAccessToken: string | null }> {
+async function getAccessTokenFromDB(): Promise<{ accessToken: string | null; publicAccessToken: string | null; readAccessToken: string | null; isExpired: boolean; expiresAt: Date | null }> {
   try {
     const supabase = getSupabaseClient();
 
@@ -91,18 +122,28 @@ async function getAccessTokenFromDB(): Promise<{ accessToken: string | null; pub
 
     if (error || !data) {
       log('DEBUG', 'No access token found in database', { error: error?.message });
-      return { accessToken: null, publicAccessToken: null, readAccessToken: null };
+      return { accessToken: null, publicAccessToken: null, readAccessToken: null, isExpired: true, expiresAt: null };
     }
 
-    log('INFO', 'Access token retrieved from database');
+    const isExpired = isTokenExpired(data.access_token);
+    const expiresAt = getTokenExpiryTime(data.access_token);
+
+    if (isExpired) {
+      log('WARN', 'Access token is expired', { expiresAt });
+    } else {
+      log('INFO', 'Access token retrieved from database', { expiresAt });
+    }
+
     return {
       accessToken: data.access_token,
       publicAccessToken: data.public_access_token,
       readAccessToken: data.read_access_token,
+      isExpired,
+      expiresAt,
     };
   } catch (e) {
     log('ERROR', 'Failed to get access token from database', { error: String(e) });
-    return { accessToken: null, publicAccessToken: null, readAccessToken: null };
+    return { accessToken: null, publicAccessToken: null, readAccessToken: null, isExpired: true, expiresAt: null };
   }
 }
 
@@ -344,6 +385,10 @@ async function handleTool(name: string, apiKey: string, apiSecret: string, param
     throw new Error("No access token found. Complete OAuth flow first using 'get_login_url' and 'exchange_token' tools.");
   }
 
+  if (tokenData.isExpired) {
+    throw new Error(`Access token expired at ${tokenData.expiresAt?.toISOString() || 'unknown time'}. Please re-authenticate using 'get_login_url' and 'exchange_token' tools.`);
+  }
+
   switch (name) {
     case "get_holdings":
       return await callPaytmAPI(API_ROUTES.holdings, tokenData.accessToken);
@@ -381,12 +426,30 @@ Deno.serve(async (req: Request) => {
       const status = {
         connected: !!(apiKey && apiSecret),
         hasAccessToken: !!tokenData.accessToken,
+        tokenExpired: tokenData.isExpired,
+        tokenExpiresAt: tokenData.expiresAt?.toISOString() || null,
         apiKeyConfigured: !!apiKey,
         secretConfigured: !!apiSecret,
         timestamp: new Date().toISOString(),
       };
 
       return new Response(JSON.stringify(status), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // Secrets endpoint - provide API keys to authenticated Next.js app
+    if (action === 'secrets') {
+      const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
+      const perplexityApiKey = Deno.env.get("PERPLEXITY_API_KEY");
+
+      const secrets = {
+        geminiApiKey: geminiApiKey || null,
+        perplexityApiKey: perplexityApiKey || null,
+      };
+
+      return new Response(JSON.stringify(secrets), {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -540,9 +603,10 @@ Deno.serve(async (req: Request) => {
     // Default response
     return new Response(JSON.stringify({
       status: "ok",
-      message: "Paytm Money MCP Server v2.0 - Secrets stored in Supabase",
+      message: "Paytm Money MCP Server v2.1 - Secrets stored in Supabase",
       endpoints: {
         status: "GET ?action=status",
+        secrets: "GET ?action=secrets",
         login_url: "GET ?action=login_url&state=<random>",
         exchange_token: "GET ?action=exchange_token&request_token=<token>",
         mcp: "POST / (MCP protocol)",

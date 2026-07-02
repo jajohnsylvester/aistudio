@@ -12,9 +12,12 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 interface MCPStatus {
   connected: boolean;
   hasAccessToken: boolean;
+  tokenExpired?: boolean;
+  tokenExpiresAt?: string | null;
   apiKeyConfigured: boolean;
   secretConfigured: boolean;
   geminiKeyConfigured?: boolean;
+  perplexityKeyConfigured?: boolean;
   timestamp?: string;
   error?: string;
 }
@@ -62,6 +65,7 @@ export default function PaytmPortfolioPage() {
       setStatus({
         connected: false,
         hasAccessToken: false,
+        tokenExpired: true,
         apiKeyConfigured: false,
         secretConfigured: false,
         error: error instanceof Error ? error.message : 'Unknown error',
@@ -252,9 +256,9 @@ export default function PaytmPortfolioPage() {
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {status?.hasAccessToken && !portfolioError ? (
+                  {status?.hasAccessToken && !status?.tokenExpired ? (
                     <CheckCircle className="h-5 w-5 text-green-500" />
-                  ) : status?.hasAccessToken && portfolioError ? (
+                  ) : status?.hasAccessToken && status?.tokenExpired ? (
                     <AlertCircle className="h-5 w-5 text-orange-500" />
                   ) : (
                     <AlertCircle className="h-5 w-5 text-yellow-500" />
@@ -262,11 +266,11 @@ export default function PaytmPortfolioPage() {
                   <div>
                     <p className="text-sm font-medium">Access Token</p>
                     <p className={`text-xs ${
-                      status?.hasAccessToken && !portfolioError ? 'text-green-600' :
-                      status?.hasAccessToken && portfolioError ? 'text-orange-600' : 'text-yellow-600'
+                      status?.hasAccessToken && !status?.tokenExpired ? 'text-green-600' :
+                      status?.hasAccessToken && status?.tokenExpired ? 'text-orange-600' : 'text-yellow-600'
                     }`}>
-                      {status?.hasAccessToken && !portfolioError ? 'Active' :
-                       status?.hasAccessToken && portfolioError ? 'May be expired' : 'OAuth Required'}
+                      {status?.hasAccessToken && !status?.tokenExpired ? 'Active' :
+                       status?.hasAccessToken && status?.tokenExpired ? `Expired ${status?.tokenExpiresAt ? new Date(status.tokenExpiresAt).toLocaleString() : ''}` : 'OAuth Required'}
                     </p>
                   </div>
                 </div>
@@ -338,31 +342,40 @@ export default function PaytmPortfolioPage() {
         </Card>
       )}
 
-      {/* OAuth Required */}
-      {status?.apiKeyConfigured && status?.secretConfigured && !status.hasAccessToken && !isLoadingStatus && (
-        <Card className="border-yellow-500/50">
+      {/* OAuth Required or Token Expired */}
+      {status?.apiKeyConfigured && status?.secretConfigured && (!status.hasAccessToken || status.tokenExpired) && !isLoadingStatus && (
+        <Card className={status.tokenExpired ? "border-orange-500/50" : "border-yellow-500/50"}>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Key className="h-5 w-5 text-yellow-500" />
-              OAuth Authentication Required
+              <Key className={status.tokenExpired ? "h-5 w-5 text-orange-500" : "h-5 w-5 text-yellow-500"} />
+              {status.tokenExpired ? 'Session Expired' : 'OAuth Authentication Required'}
             </CardTitle>
             <CardDescription>
-              Connect your Paytm Money account to view your portfolio
+              {status.tokenExpired
+                ? `Your access token expired. Please re-authenticate to view your portfolio.`
+                : 'Connect your Paytm Money account to view your portfolio'}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {status.tokenExpired && status.tokenExpiresAt && (
+              <div className="p-3 bg-orange-50 dark:bg-orange-950 rounded-lg">
+                <p className="text-sm text-orange-700 dark:text-orange-400">
+                  Token expired at: {new Date(status.tokenExpiresAt).toLocaleString()}
+                </p>
+              </div>
+            )}
             <p className="text-sm text-muted-foreground">
-              Click the button below to login with your Paytm Money account.
+              Click the button below to {status.tokenExpired ? 're-authenticate' : 'login'} with your Paytm Money account.
               After authentication, your access token will be securely stored.
             </p>
             <Button onClick={startOAuthFlow} className="w-full" size="lg">
               <ExternalLink className="mr-2 h-4 w-4" />
-              Login with Paytm Money
+              {status.tokenExpired ? 'Re-authenticate with Paytm Money' : 'Login with Paytm Money'}
             </Button>
             <div className="bg-muted p-3 rounded-lg text-xs text-muted-foreground">
               <p className="font-medium mb-1">How it works:</p>
               <ol className="list-decimal list-inside space-y-1">
-                <li>Click "Login with Paytm Money"</li>
+                <li>Click "{status.tokenExpired ? 'Re-authenticate' : 'Login'} with Paytm Money"</li>
                 <li>Enter your Paytm Money credentials</li>
                 <li>Access token is saved securely</li>
                 <li>Your portfolio loads automatically</li>
@@ -443,7 +456,7 @@ export default function PaytmPortfolioPage() {
       )}
 
       {/* Portfolio Summary */}
-      {status?.hasAccessToken && portfolio && !portfolioError && (
+      {status?.hasAccessToken && !status?.tokenExpired && portfolio && !portfolioError && (
         <>
           <div className="grid gap-4 md:grid-cols-4">
             <Card>

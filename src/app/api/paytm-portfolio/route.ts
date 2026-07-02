@@ -16,8 +16,46 @@ function log(level: 'INFO' | 'DEBUG' | 'ERROR' | 'WARN', message: string, data?:
 // MCP URL - credentials are stored in Supabase secrets
 const PAYTM_MCP_URL = process.env.PAYTM_MCP_URL || 'https://kkzurvqbtguldcppujtn.supabase.co/functions/v1/paytm-mcp';
 
-// Gemini API key is still needed locally for AI insights (or we can get it from environment)
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// Cache for secrets (fetched from Supabase)
+let secretsCache: { geminiApiKey: string | null; perplexityApiKey: string | null } | null = null;
+let secretsCacheTime = 0;
+const SECRETS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Fetch secrets from Supabase edge function
+async function getSecrets(): Promise<{ geminiApiKey: string | null; perplexityApiKey: string | null }> {
+  const now = Date.now();
+
+  // Return cached secrets if still valid
+  if (secretsCache && (now - secretsCacheTime) < SECRETS_CACHE_TTL) {
+    return secretsCache;
+  }
+
+  try {
+    const response = await fetch(`${PAYTM_MCP_URL}?action=secrets`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      secretsCache = {
+        geminiApiKey: data.geminiApiKey || null,
+        perplexityApiKey: data.perplexityApiKey || null,
+      };
+      secretsCacheTime = now;
+      log('INFO', 'Secrets fetched from Supabase');
+      return secretsCache;
+    }
+  } catch (error) {
+    log('WARN', 'Failed to fetch secrets from Supabase, using env fallback');
+  }
+
+  // Fallback to environment variables
+  return {
+    geminiApiKey: process.env.GEMINI_API_KEY || null,
+    perplexityApiKey: process.env.PERPLEXITY_API_KEY || null,
+  };
+}
 
 interface Holding {
   trading_symbol: string;
@@ -113,8 +151,11 @@ async function callMCPTool(toolName: string, args?: Record<string, any>): Promis
 
 // Generate AI insights
 async function generateInsights(portfolioData: PortfolioSummary): Promise<string> {
-  if (!GEMINI_API_KEY) {
-    return 'Gemini API key not configured. Add GEMINI_API_KEY to .env for AI insights.';
+  const secrets = await getSecrets();
+  const geminiApiKey = secrets.geminiApiKey;
+
+  if (!geminiApiKey) {
+    return 'Gemini API key not configured. Add GEMINI_API_KEY to Supabase secrets for AI insights.';
   }
 
   const prompt = `Analyze this stock portfolio and provide insights:
@@ -136,7 +177,7 @@ Provide a brief analysis including:
 
   try {
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -170,18 +211,25 @@ export async function GET(request: NextRequest) {
     // Status check - credentials come from Supabase secrets
     if (action === 'status') {
       try {
-        const status = await callMCPApi('status');
+        const [status, secrets] = await Promise.all([
+          callMCPApi('status'),
+          getSecrets()
+        ]);
         return NextResponse.json({
           ...status,
-          geminiKeyConfigured: !!GEMINI_API_KEY,
+          geminiKeyConfigured: !!secrets.geminiApiKey,
+          perplexityKeyConfigured: !!secrets.perplexityApiKey,
         });
       } catch (e) {
+        const secrets = await getSecrets();
         return NextResponse.json({
           connected: false,
           hasAccessToken: false,
+          tokenExpired: true,
           apiKeyConfigured: false,
           secretConfigured: false,
-          geminiKeyConfigured: !!GEMINI_API_KEY,
+          geminiKeyConfigured: !!secrets.geminiApiKey,
+          perplexityKeyConfigured: !!secrets.perplexityApiKey,
           error: e instanceof Error ? e.message : 'Failed to connect to MCP server',
         });
       }
@@ -256,10 +304,16 @@ export async function GET(request: NextRequest) {
         });
       } catch (mcpError: any) {
         log('ERROR', 'MCP Tool call error', { requestId, error: mcpError.message });
+
+        // Check if error is about token expiry
+        const isTokenExpired = mcpError.message.includes('expired') ||
+                               mcpError.message.includes('re-authenticate');
+
         return NextResponse.json({
           error: mcpError.message,
-          oauthRequired: mcpError.message.includes('access token'),
-        }, { status: mcpError.message.includes('access token') ? 503 : 500 });
+          oauthRequired: isTokenExpired,
+          tokenExpired: isTokenExpired,
+        }, { status: isTokenExpired ? 503 : 500 });
       }
     }
 
