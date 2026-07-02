@@ -443,10 +443,16 @@ Deno.serve(async (req: Request) => {
     if (action === 'secrets') {
       const geminiApiKey = Deno.env.get("GEMINI_API_KEY");
       const perplexityApiKey = Deno.env.get("PERPLEXITY_API_KEY");
+      const googleSheetsClientEmail = Deno.env.get("GOOGLE_SHEETS_CLIENT_EMAIL");
+      const googleSheetsPrivateKey = Deno.env.get("GOOGLE_SHEETS_PRIVATE_KEY");
+      const googleSheetsSheetId = Deno.env.get("GOOGLE_SHEETS_SHEET_ID");
 
       const secrets = {
         geminiApiKey: geminiApiKey || null,
         perplexityApiKey: perplexityApiKey || null,
+        googleSheetsClientEmail: googleSheetsClientEmail || null,
+        googleSheetsPrivateKey: googleSheetsPrivateKey || null,
+        googleSheetsSheetId: googleSheetsSheetId || null,
       };
 
       return new Response(JSON.stringify(secrets), {

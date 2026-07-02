@@ -7,23 +7,75 @@ import type { Expense, Budget, ImportantDate } from './types';
 import { format, getYear } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 
-const SHEET_ID = process.env.GOOGLE_SHEETS_SHEET_ID;
 const TIME_ZONE = 'Asia/Kolkata';
+const PAYTM_MCP_URL = process.env.PAYTM_MCP_URL || 'https://kkzurvqbtguldcppujtn.supabase.co/functions/v1/paytm-mcp';
+
+// Cache for secrets
+let secretsCache: {
+  googleSheetsClientEmail: string | null;
+  googleSheetsPrivateKey: string | null;
+  googleSheetsSheetId: string | null;
+} | null = null;
+let secretsCacheTime = 0;
+const SECRETS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Fetch Google Sheets secrets from Supabase
+async function getGoogleSheetsSecrets(): Promise<{
+  googleSheetsClientEmail: string | null;
+  googleSheetsPrivateKey: string | null;
+  googleSheetsSheetId: string | null;
+}> {
+  const now = Date.now();
+
+  // Return cached secrets if still valid
+  if (secretsCache && (now - secretsCacheTime) < SECRETS_CACHE_TTL) {
+    return secretsCache;
+  }
+
+  try {
+    const response = await fetch(`${PAYTM_MCP_URL}?action=secrets`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      secretsCache = {
+        googleSheetsClientEmail: data.googleSheetsClientEmail || null,
+        googleSheetsPrivateKey: data.googleSheetsPrivateKey || null,
+        googleSheetsSheetId: data.googleSheetsSheetId || null,
+      };
+      secretsCacheTime = now;
+      return secretsCache;
+    }
+  } catch (error) {
+    console.warn('Failed to fetch Google Sheets secrets from Supabase, using env fallback');
+  }
+
+  // Fallback to environment variables
+  return {
+    googleSheetsClientEmail: process.env.GOOGLE_SHEETS_CLIENT_EMAIL || null,
+    googleSheetsPrivateKey: process.env.GOOGLE_SHEETS_PRIVATE_KEY || null,
+    googleSheetsSheetId: process.env.GOOGLE_SHEETS_SHEET_ID || null,
+  };
+}
 
 const months = [
-  "January", "February", "March", "April", "May", "June", 
+  "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December"
 ];
 
-const getAuth = () => {
-  if (!process.env.GOOGLE_SHEETS_CLIENT_EMAIL || !process.env.GOOGLE_SHEETS_PRIVATE_KEY || !process.env.GOOGLE_SHEETS_SHEET_ID) {
-    throw new Error('Google Sheets API credentials or Sheet ID are not set in .env file.');
+const getAuth = async () => {
+  const secrets = await getGoogleSheetsSecrets();
+
+  if (!secrets.googleSheetsClientEmail || !secrets.googleSheetsPrivateKey || !secrets.googleSheetsSheetId) {
+    throw new Error('Google Sheets API credentials or Sheet ID are not set. Add GOOGLE_SHEETS_CLIENT_EMAIL, GOOGLE_SHEETS_PRIVATE_KEY, and GOOGLE_SHEETS_SHEET_ID to Supabase secrets.');
   }
 
   const auth = new google.auth.GoogleAuth({
     credentials: {
-      client_email: process.env.GOOGLE_SHEETS_CLIENT_EMAIL,
-      private_key: process.env.GOOGLE_SHEETS_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      client_email: secrets.googleSheetsClientEmail,
+      private_key: secrets.googleSheetsPrivateKey.replace(/\\n/g, '\n'),
     },
     scopes: [
         'https://www.googleapis.com/auth/spreadsheets',
@@ -33,33 +85,38 @@ const getAuth = () => {
   return auth;
 };
 
-const getSheets = () => {
-  const auth = getAuth();
+const getSheetId = async () => {
+  const secrets = await getGoogleSheetsSecrets();
+  return secrets.googleSheetsSheetId;
+};
+
+const getSheets = async () => {
+  const auth = await getAuth();
   return google.sheets({ version: 'v4', auth });
 }
 
-async function getSheetIdByName(sheets: any, sheetName: string): Promise<number | undefined> {
+async function getSheetIdByName(sheets: any, sheetId: string, sheetName: string): Promise<number | undefined> {
     const response = await sheets.spreadsheets.get({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
     });
     const sheet = response.data.sheets?.find((s: any) => s.properties?.title === sheetName);
     return sheet?.properties?.sheetId;
 }
 
-async function ensureSheetExists(sheets: any, sheetName: string, headers: string[]) {
+async function ensureSheetExists(sheets: any, sheetId: string, sheetName: string, headers: string[]) {
     try {
-        const sheetInfo = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+        const sheetInfo = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
         const sheetExists = sheetInfo.data.sheets.some((s: any) => s.properties.title === sheetName);
 
         if (!sheetExists) {
             await sheets.spreadsheets.batchUpdate({
-                spreadsheetId: SHEET_ID,
+                spreadsheetId: sheetId,
                 requestBody: {
                     requests: [{ addSheet: { properties: { title: sheetName } } }],
                 },
             });
             await sheets.spreadsheets.values.update({
-                spreadsheetId: SHEET_ID,
+                spreadsheetId: sheetId,
                 range: `${sheetName}!A1`,
                 valueInputOption: 'RAW',
                 requestBody: {
@@ -125,15 +182,20 @@ function parseExpenseRows(rows: any[][] | null | undefined): Expense[] {
 
 
 export async function getExpenses(year: number): Promise<Expense[]> {
-  const sheets = getSheets();
+  const sheets = await getSheets();
+  const sheetId = await getSheetId();
+
+  if (!sheetId) {
+    throw new Error('Google Sheets Sheet ID not configured');
+  }
 
   if (year < 2025) {
     try {
         const range = `Transactions-${year}`;
-        await ensureSheetExists(sheets, range, ['id', 'date', 'description', 'category', 'amount', 'paid']);
-        
+        await ensureSheetExists(sheets, sheetId, range, ['id', 'date', 'description', 'category', 'amount', 'paid']);
+
         const response = await sheets.spreadsheets.values.get({
-          spreadsheetId: SHEET_ID,
+          spreadsheetId: sheetId,
           range: range,
         });
 
@@ -153,7 +215,7 @@ export async function getExpenses(year: number): Promise<Expense[]> {
         const range = `Transactions-${year}-${month}`;
         try {
             const response = await sheets.spreadsheets.values.get({
-                spreadsheetId: SHEET_ID,
+                spreadsheetId: sheetId,
                 range: range,
             });
             return parseExpenseRows(response.data.values);
@@ -176,14 +238,20 @@ export async function getExpenses(year: number): Promise<Expense[]> {
 }
 
 export async function addExpense(expense: Omit<Expense, 'id'>): Promise<Expense> {
-  const sheets = getSheets();
+  const sheets = await getSheets();
+  const sheetId = await getSheetId();
+
+  if (!sheetId) {
+    throw new Error('Google Sheets Sheet ID not configured');
+  }
+
   const expenseDate = toZonedTime(new Date(expense.date), TIME_ZONE);
   const range = getSheetName(expenseDate);
-  
-  await ensureSheetExists(sheets, range, ['id', 'date', 'description', 'category', 'amount', 'paid']);
+
+  await ensureSheetExists(sheets, sheetId, range, ['id', 'date', 'description', 'category', 'amount', 'paid']);
 
   const response = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
+    spreadsheetId: sheetId,
     range: `${range}!A:A`,
   });
 
@@ -191,25 +259,25 @@ export async function addExpense(expense: Omit<Expense, 'id'>): Promise<Expense>
   const maxId = existingIds.length > 0 ? Math.max(0, ...existingIds) : 0;
   const newId = maxId + 1;
 
-  const newExpense: Expense = { 
-    ...expense, 
+  const newExpense: Expense = {
+    ...expense,
     id: newId.toString(),
     paid: expense.category === 'Credit Card' ? !!expense.paid : undefined
   };
-  
+
   const formattedDate = format(expenseDate, 'yyyy-MM-dd');
 
   const newRow = [
-    newExpense.id, 
-    formattedDate, 
-    newExpense.description, 
-    newExpense.category, 
+    newExpense.id,
+    formattedDate,
+    newExpense.description,
+    newExpense.category,
     newExpense.amount,
     newExpense.category === 'Credit Card' ? (newExpense.paid ? 'Paid' : 'Not Paid') : ''
   ];
 
   await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
+    spreadsheetId: sheetId,
     range: range,
     valueInputOption: 'USER_ENTERED',
     requestBody: {
@@ -220,9 +288,9 @@ export async function addExpense(expense: Omit<Expense, 'id'>): Promise<Expense>
   return newExpense;
 }
 
-async function findRowById(sheets: any, rangeName: string, id: string): Promise<{rowIndex: number, range: string} | null> {
+async function findRowById(sheets: any, sheetId: string, rangeName: string, id: string): Promise<{rowIndex: number, range: string} | null> {
     const response = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
+      spreadsheetId: sheetId,
       range: `${rangeName}!A:A`,
     });
     const ids = response.data.values;
@@ -233,27 +301,32 @@ async function findRowById(sheets: any, rangeName: string, id: string): Promise<
 
 
 export async function updateExpense(expense: Expense): Promise<Expense> {
-  const sheets = getSheets();
-  
+  const sheets = await getSheets();
+  const sheetId = await getSheetId();
+
+  if (!sheetId) {
+    throw new Error('Google Sheets Sheet ID not configured');
+  }
+
   const updatedDate = toZonedTime(new Date(expense.date), TIME_ZONE);
   const range = getSheetName(updatedDate);
 
   // This logic is simple and will fail if the date is changed across a sheet boundary (month or year).
   // This matches the buggy behavior of the original code, which failed on year changes.
-  const found = await findRowById(sheets, range, expense.id);
+  const found = await findRowById(sheets, sheetId, range, expense.id);
 
   if (found === null) {
     throw new Error('Expense not found to update');
   }
-  
+
   const { rowIndex } = found;
-  
+
   const formattedDate = format(updatedDate, 'yyyy-MM-dd');
   const paidValue = expense.category === 'Credit Card' ? (expense.paid ? 'Paid' : 'Not Paid') : '';
   const updatedRow = [expense.id, formattedDate, expense.description, expense.category, expense.amount, paidValue];
 
   await sheets.spreadsheets.values.update({
-    spreadsheetId: SHEET_ID,
+    spreadsheetId: sheetId,
     range: `${range}!A${rowIndex}:F${rowIndex}`,
     valueInputOption: 'USER_ENTERED',
     requestBody: {
@@ -265,32 +338,38 @@ export async function updateExpense(expense: Expense): Promise<Expense> {
 }
 
 export async function deleteExpense(expense: Expense, year?: number): Promise<void> {
-  const sheets = getSheets();
+  const sheets = await getSheets();
+  const sheetId = await getSheetId();
+
+  if (!sheetId) {
+    throw new Error('Google Sheets Sheet ID not configured');
+  }
+
   const expenseDate = toZonedTime(new Date(expense.date), TIME_ZONE);
   const range = getSheetName(expenseDate);
-  
-  const found = await findRowById(sheets, range, expense.id);
+
+  const found = await findRowById(sheets, sheetId, range, expense.id);
 
   if (found === null) {
     throw new Error('Expense not found to delete');
   }
-  
+
   const { rowIndex } = found;
 
-  const sheetId = await getSheetIdByName(sheets, range);
-  
-  if (sheetId === undefined) {
+  const targetSheetId = await getSheetIdByName(sheets, sheetId, range);
+
+  if (targetSheetId === undefined) {
     throw new Error("Could not find sheet ID to delete row.");
   }
 
   await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: SHEET_ID,
+      spreadsheetId: sheetId,
       requestBody: {
           requests: [
               {
                   deleteDimension: {
                       range: {
-                          sheetId: sheetId, 
+                          sheetId: targetSheetId,
                           dimension: 'ROWS',
                           startIndex: rowIndex - 1,
                           endIndex: rowIndex,
@@ -306,12 +385,16 @@ export async function deleteExpense(expense: Expense, year?: number): Promise<vo
 
 export async function getCategories(): Promise<string[]> {
     try {
-        const sheets = getSheets();
+        const sheets = await getSheets();
+        const sheetId = await getSheetId();
+
+        if (!sheetId) return [];
+
         const range = 'Categories';
-        await ensureSheetExists(sheets, range, ['name']);
-        
+        await ensureSheetExists(sheets, sheetId, range, ['name']);
+
         const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: SHEET_ID,
+            spreadsheetId: sheetId,
             range: `${range}!A2:A`,
         });
 
@@ -326,11 +409,17 @@ export async function getCategories(): Promise<string[]> {
 }
 
 export async function addCategory(categoryName: string): Promise<void> {
-    const sheets = getSheets();
+    const sheets = await getSheets();
+    const sheetId = await getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
     const range = 'Categories';
-    
+
     await sheets.spreadsheets.values.append({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: range,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
@@ -340,11 +429,17 @@ export async function addCategory(categoryName: string): Promise<void> {
 }
 
 export async function deleteCategory(categoryName: string): Promise<void> {
-    const sheets = getSheets();
+    const sheets = await getSheets();
+    const sheetId = await getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
     const range = 'Categories';
 
     const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: `${range}!A:A`,
     });
 
@@ -352,26 +447,26 @@ export async function deleteCategory(categoryName: string): Promise<void> {
     if (!categories) {
         throw new Error("Category sheet is empty.");
     }
-    
+
     const rowIndex = categories.findIndex(row => row[0] === categoryName);
 
     if (rowIndex === -1) {
         throw new Error('Category not found to delete.');
     }
-    
-    const sheetId = await getSheetIdByName(sheets, range);
-    if (sheetId === undefined) {
+
+    const targetSheetId = await getSheetIdByName(sheets, sheetId, range);
+    if (targetSheetId === undefined) {
         throw new Error(`Could not find sheet ID for "${range}" to delete row.`);
     }
 
     await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         requestBody: {
             requests: [
                 {
                     deleteDimension: {
                         range: {
-                            sheetId: sheetId,
+                            sheetId: targetSheetId,
                             dimension: 'ROWS',
                             startIndex: rowIndex,
                             endIndex: rowIndex + 1,
@@ -387,18 +482,22 @@ export async function deleteCategory(categoryName: string): Promise<void> {
 // --- BUDGETS ---
 export async function getBudgets(): Promise<Budget[]> {
     try {
-        const sheets = getSheets();
+        const sheets = await getSheets();
+        const sheetId = await getSheetId();
+
+        if (!sheetId) return [];
+
         const range = 'Budgets';
-        await ensureSheetExists(sheets, range, ['category', 'amount']);
+        await ensureSheetExists(sheets, sheetId, range, ['category', 'amount']);
 
         const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: SHEET_ID,
+            spreadsheetId: sheetId,
             range: `${range}!A2:B`,
         });
 
         const rows = response.data.values;
         if (!rows) return [];
-        
+
         return rows.map(row => ({
             category: row[0],
             amount: parseFloat(row[1]) || 0,
@@ -410,18 +509,24 @@ export async function getBudgets(): Promise<Budget[]> {
 }
 
 export async function updateBudgets(budgets: Budget[]): Promise<void> {
-    const sheets = getSheets();
+    const sheets = await getSheets();
+    const sheetId = await getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
     const range = 'Budgets';
-    
+
     await sheets.spreadsheets.values.clear({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: `${range}!A2:B`,
     });
-    
+
     if(budgets.length === 0) return;
-    
+
     await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: `${range}!A2`,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
@@ -436,12 +541,16 @@ const MASTER_PASSWORD_KEY = "masterPassword";
 
 export async function getMasterPassword(): Promise<string | null> {
     try {
-        const sheets = getSheets();
+        const sheets = await getSheets();
+        const sheetId = await getSheetId();
+
+        if (!sheetId) return null;
+
         const range = 'Settings';
-        await ensureSheetExists(sheets, range, ['key', 'value']);
+        await ensureSheetExists(sheets, sheetId, range, ['key', 'value']);
 
         const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: SHEET_ID,
+            spreadsheetId: sheetId,
             range: `${range}!A:B`,
         });
 
@@ -449,7 +558,7 @@ export async function getMasterPassword(): Promise<string | null> {
         if (!rows || rows.length <= 1) {
             return null;
         }
-        
+
         const passwordRow = rows.find(row => row[0] === MASTER_PASSWORD_KEY);
         return passwordRow ? passwordRow[1] : null;
     } catch (error) {
@@ -459,20 +568,26 @@ export async function getMasterPassword(): Promise<string | null> {
 }
 
 export async function setMasterPassword(password: string): Promise<void> {
-    const sheets = getSheets();
+    const sheets = await getSheets();
+    const sheetId = await getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
     const range = 'Settings';
 
     const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: `${range}!A:A`,
     });
-    
+
     const rows = response.data.values;
     let rowIndex = rows ? rows.findIndex(row => row[0] === MASTER_PASSWORD_KEY) : -1;
-    
+
     if (rowIndex !== -1) {
         await sheets.spreadsheets.values.update({
-            spreadsheetId: SHEET_ID,
+            spreadsheetId: sheetId,
             range: `${range}!B${rowIndex + 1}`,
             valueInputOption: 'RAW',
             requestBody: {
@@ -481,7 +596,7 @@ export async function setMasterPassword(password: string): Promise<void> {
         });
     } else {
         await sheets.spreadsheets.values.append({
-            spreadsheetId: SHEET_ID,
+            spreadsheetId: sheetId,
             range: range,
             valueInputOption: 'RAW',
             requestBody: {
@@ -493,9 +608,13 @@ export async function setMasterPassword(password: string): Promise<void> {
 
 export async function getYearsWithExpenses(): Promise<number[]> {
     try {
-        const sheets = getSheets();
+        const sheets = await getSheets();
+        const sheetId = await getSheetId();
+
+        if (!sheetId) return [new Date().getFullYear()];
+
         const response = await sheets.spreadsheets.get({
-            spreadsheetId: SHEET_ID,
+            spreadsheetId: sheetId,
         });
 
         const sheetTitles = response.data.sheets?.map(s => s.properties?.title || '') || [];
@@ -504,7 +623,7 @@ export async function getYearsWithExpenses(): Promise<number[]> {
             .map(title => parseInt(title.split('-')[1]))
             .filter(year => !isNaN(year))
             .sort((a, b) => b - a);
-            
+
         return transactionYears;
     } catch (error) {
         console.error('Error fetching sheet years:', error);
@@ -514,19 +633,23 @@ export async function getYearsWithExpenses(): Promise<number[]> {
 
 export async function searchAllExpenses(query: string): Promise<Omit<Expense, 'id' | 'paid'>[]> {
   try {
-    const sheets = getSheets();
-    const spreadsheetInfo = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+    const sheets = await getSheets();
+    const sheetId = await getSheetId();
+
+    if (!sheetId) return [];
+
+    const spreadsheetInfo = await sheets.spreadsheets.get({ spreadsheetId: sheetId });
     const allSheetNames = spreadsheetInfo.data.sheets?.map(s => s.properties?.title || '') || [];
-    
+
     const transactionSheetNames = allSheetNames.filter(name => name.startsWith('Transactions-'));
 
     if (transactionSheetNames.length === 0) {
       return [];
     }
 
-    const searchPromises = transactionSheetNames.map(sheetName => 
+    const searchPromises = transactionSheetNames.map(sheetName =>
       sheets.spreadsheets.values.get({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: sheetName,
       })
     );
@@ -548,7 +671,7 @@ export async function searchAllExpenses(query: string): Promise<Omit<Expense, 'i
       if ([descriptionIndex, dateIndex, categoryIndex, amountIndex].includes(-1)) {
         return;
       }
-      
+
       rows.slice(1).forEach(row => {
         const description = row[descriptionIndex] || '';
         if (description.toLowerCase().includes(lowerCaseQuery)) {
@@ -568,7 +691,7 @@ export async function searchAllExpenses(query: string): Promise<Omit<Expense, 'i
         }
       });
     });
-    
+
     // Sort by date descending
     allResults.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
@@ -581,7 +704,7 @@ export async function searchAllExpenses(query: string): Promise<Omit<Expense, 'i
 
 export async function getAllSheetNames(spreadsheetId: string): Promise<string[]> {
     try {
-        const sheets = getSheets();
+        const sheets = await getSheets();
         const response = await sheets.spreadsheets.get({
             spreadsheetId: spreadsheetId,
             fields: 'sheets(properties.title)', // Only fetch sheet titles
@@ -620,7 +743,7 @@ export async function getFirstSheetName(spreadsheetId: string): Promise<string> 
 
 export async function getRawSheetData(spreadsheetId: string, range: string): Promise<string[][]> {
     try {
-        const sheets = getSheets();
+        const sheets = await getSheets();
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: spreadsheetId,
             range: range,
@@ -643,7 +766,7 @@ export async function getRawSheetData(spreadsheetId: string, range: string): Pro
 
 export async function updateRawSheetData(spreadsheetId: string, range: string, values: string[][]): Promise<void> {
     try {
-        const sheets = getSheets();
+        const sheets = await getSheets();
         await sheets.spreadsheets.values.update({
             spreadsheetId: spreadsheetId,
             range: range,
@@ -669,7 +792,7 @@ export async function updateRawSheetData(spreadsheetId: string, range: string, v
 
 export async function getGoogleDocContent(documentId: string): Promise<any> {
     try {
-        const auth = getAuth();
+        const auth = await getAuth();
         const docs = google.docs({ version: 'v1', auth });
 
         const response = await docs.documents.get({
@@ -723,11 +846,15 @@ function parseImportantDateRows(rows: any[][] | null | undefined): ImportantDate
 
 export async function getImportantDates(sheetName: string): Promise<ImportantDate[]> {
     try {
-        const sheets = getSheets();
-        await ensureSheetExists(sheets, sheetName, ['id', 'title', 'date', 'description', 'price', 'shop']);
-        
+        const sheets = await getSheets();
+        const sheetId = await getSheetId();
+
+        if (!sheetId) return [];
+
+        await ensureSheetExists(sheets, sheetId, sheetName, ['id', 'title', 'date', 'description', 'price', 'shop']);
+
         const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: SHEET_ID,
+            spreadsheetId: sheetId,
             range: `${sheetName}!A:F`,
         });
 
@@ -739,11 +866,17 @@ export async function getImportantDates(sheetName: string): Promise<ImportantDat
 }
 
 export async function addImportantDate(sheetName: string, dateData: Omit<ImportantDate, 'id'>): Promise<ImportantDate> {
-    const sheets = getSheets();
-    await ensureSheetExists(sheets, sheetName, ['id', 'title', 'date', 'description', 'price', 'shop']);
+    const sheets = await getSheets();
+    const sheetId = await getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
+    await ensureSheetExists(sheets, sheetId, sheetName, ['id', 'title', 'date', 'description', 'price', 'shop']);
 
     const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: `${sheetName}!A:A`,
     });
 
@@ -755,7 +888,7 @@ export async function addImportantDate(sheetName: string, dateData: Omit<Importa
     const newRow = [newDate.id, newDate.title, newDate.date, newDate.description || '', newDate.price || '', newDate.shop || ''];
 
     await sheets.spreadsheets.values.append({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: sheetName,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
@@ -767,18 +900,24 @@ export async function addImportantDate(sheetName: string, dateData: Omit<Importa
 }
 
 export async function updateImportantDate(sheetName: string, dateData: ImportantDate): Promise<ImportantDate> {
-    const sheets = getSheets();
-    const found = await findRowById(sheets, sheetName, dateData.id);
+    const sheets = await getSheets();
+    const sheetId = await getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
+    const found = await findRowById(sheets, sheetId, sheetName, dateData.id);
 
     if (found === null) {
         throw new Error('Important date not found to update');
     }
-    
+
     const { rowIndex } = found;
     const updatedRow = [dateData.id, dateData.title, dateData.date, dateData.description || '', dateData.price || '', dateData.shop || ''];
 
     await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: `${sheetName}!A${rowIndex}:F${rowIndex}`,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
@@ -790,28 +929,34 @@ export async function updateImportantDate(sheetName: string, dateData: Important
 }
 
 export async function deleteImportantDate(sheetName: string, dateData: ImportantDate): Promise<void> {
-    const sheets = getSheets();
-    const found = await findRowById(sheets, sheetName, dateData.id);
+    const sheets = await getSheets();
+    const sheetId = await getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
+    const found = await findRowById(sheets, sheetId, sheetName, dateData.id);
 
     if (found === null) {
         throw new Error('Important date not found to delete');
     }
-    
+
     const { rowIndex } = found;
-    const sheetId = await getSheetIdByName(sheets, sheetName);
-    
-    if (sheetId === undefined) {
+    const targetSheetId = await getSheetIdByName(sheets, sheetId, sheetName);
+
+    if (targetSheetId === undefined) {
         throw new Error(`Could not find sheet ID for "${sheetName}" to delete row.`);
     }
 
     await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         requestBody: {
             requests: [
                 {
                     deleteDimension: {
                         range: {
-                            sheetId: sheetId, 
+                            sheetId: targetSheetId,
                             dimension: 'ROWS',
                             startIndex: rowIndex - 1,
                             endIndex: rowIndex,
@@ -848,12 +993,16 @@ function parseNoteRows(rows: any[][] | null | undefined): Note[] {
 
 export async function getNotes(): Promise<Note[]> {
     try {
-        const sheets = getSheets();
+        const sheets = await getSheets();
+        const sheetId = await getSheetId();
+
+        if (!sheetId) return [];
+
         const range = 'ScratchNotes';
-        await ensureSheetExists(sheets, range, ['id', 'content', 'date']);
-        
+        await ensureSheetExists(sheets, sheetId, range, ['id', 'content', 'date']);
+
         const response = await sheets.spreadsheets.values.get({
-            spreadsheetId: SHEET_ID,
+            spreadsheetId: sheetId,
             range: `${range}!A:C`,
         });
 
@@ -865,12 +1014,18 @@ export async function getNotes(): Promise<Note[]> {
 }
 
 export async function addNote(noteData: Omit<Note, 'id'>): Promise<Note> {
-    const sheets = getSheets();
+    const sheets = await getSheets();
+    const sheetId = await getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
     const range = 'ScratchNotes';
-    await ensureSheetExists(sheets, range, ['id', 'content', 'date']);
+    await ensureSheetExists(sheets, sheetId, range, ['id', 'content', 'date']);
 
     const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: `${range}!A:A`,
     });
 
@@ -882,7 +1037,7 @@ export async function addNote(noteData: Omit<Note, 'id'>): Promise<Note> {
     const newRow = [newNote.id, newNote.content, newNote.date];
 
     await sheets.spreadsheets.values.append({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: range,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
@@ -894,19 +1049,25 @@ export async function addNote(noteData: Omit<Note, 'id'>): Promise<Note> {
 }
 
 export async function updateNote(noteData: Note): Promise<Note> {
-    const sheets = getSheets();
+    const sheets = await getSheets();
+    const sheetId = await getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
     const range = 'ScratchNotes';
-    const found = await findRowById(sheets, range, noteData.id);
+    const found = await findRowById(sheets, sheetId, range, noteData.id);
 
     if (found === null) {
         throw new Error('Note not found to update');
     }
-    
+
     const { rowIndex } = found;
     const updatedRow = [noteData.id, noteData.content, noteData.date];
 
     await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         range: `${range}!A${rowIndex}:C${rowIndex}`,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
@@ -918,29 +1079,35 @@ export async function updateNote(noteData: Note): Promise<Note> {
 }
 
 export async function deleteNote(noteId: string): Promise<void> {
-    const sheets = getSheets();
+    const sheets = await getSheets();
+    const sheetId = await getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
     const range = 'ScratchNotes';
-    const found = await findRowById(sheets, range, noteId);
+    const found = await findRowById(sheets, sheetId, range, noteId);
 
     if (found === null) {
         throw new Error('Note not found to delete');
     }
-    
+
     const { rowIndex } = found;
-    const sheetId = await getSheetIdByName(sheets, range);
-    
-    if (sheetId === undefined) {
+    const targetSheetId = await getSheetIdByName(sheets, sheetId, range);
+
+    if (targetSheetId === undefined) {
         throw new Error(`Could not find sheet ID for "${range}" to delete row.`);
     }
 
     await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: SHEET_ID,
+        spreadsheetId: sheetId,
         requestBody: {
             requests: [
                 {
                     deleteDimension: {
                         range: {
-                            sheetId: sheetId, 
+                            sheetId: targetSheetId,
                             dimension: 'ROWS',
                             startIndex: rowIndex - 1,
                             endIndex: rowIndex,
