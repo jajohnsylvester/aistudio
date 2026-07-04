@@ -8,15 +8,57 @@ import { format, getYear } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 
 const TIME_ZONE = 'Asia/Kolkata';
+const PAYTM_MCP_URL = process.env.PAYTM_MCP_URL || 'https://kkzurvqbtguldcppujtn.supabase.co/functions/v1/paytm-mcp';
 
-// Get credentials directly from environment variables
-const getCredentials = () => {
-  const clientEmail = process.env.GOOGLE_SHEETS_CLIENT_EMAIL;
-  const privateKey = process.env.GOOGLE_SHEETS_PRIVATE_KEY;
-  const sheetId = process.env.GOOGLE_SHEETS_SHEET_ID;
+// Cache for secrets
+let secretsCache: {
+  googleSheetsClientEmail: string | null;
+  googleSheetsPrivateKey: string | null;
+  googleSheetsSheetId: string | null;
+} | null = null;
+let secretsCacheTime = 0;
+const SECRETS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-  return { clientEmail, privateKey, sheetId };
-};
+// Fetch Google Sheets secrets from Supabase
+async function getGoogleSheetsSecrets(): Promise<{
+  googleSheetsClientEmail: string | null;
+  googleSheetsPrivateKey: string | null;
+  googleSheetsSheetId: string | null;
+}> {
+  const now = Date.now();
+
+  // Return cached secrets if still valid
+  if (secretsCache && (now - secretsCacheTime) < SECRETS_CACHE_TTL) {
+    return secretsCache;
+  }
+
+  try {
+    const response = await fetch(`${PAYTM_MCP_URL}?action=secrets`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      secretsCache = {
+        googleSheetsClientEmail: data.googleSheetsClientEmail || null,
+        googleSheetsPrivateKey: data.googleSheetsPrivateKey || null,
+        googleSheetsSheetId: data.googleSheetsSheetId || null,
+      };
+      secretsCacheTime = now;
+      return secretsCache;
+    }
+  } catch (error) {
+    console.warn('Failed to fetch Google Sheets secrets from Supabase, using env fallback');
+  }
+
+  // Fallback to environment variables
+  return {
+    googleSheetsClientEmail: process.env.GOOGLE_SHEETS_CLIENT_EMAIL || null,
+    googleSheetsPrivateKey: process.env.GOOGLE_SHEETS_PRIVATE_KEY || null,
+    googleSheetsSheetId: process.env.GOOGLE_SHEETS_SHEET_ID || null,
+  };
+}
 
 const months = [
   "January", "February", "March", "April", "May", "June",
@@ -24,16 +66,16 @@ const months = [
 ];
 
 const getAuth = async () => {
-  const { clientEmail, privateKey, sheetId } = getCredentials();
+  const secrets = await getGoogleSheetsSecrets();
 
-  if (!clientEmail || !privateKey || !sheetId) {
-    throw new Error('Google Sheets API credentials or Sheet ID are not set. Add GOOGLE_SHEETS_CLIENT_EMAIL, GOOGLE_SHEETS_PRIVATE_KEY, and GOOGLE_SHEETS_SHEET_ID to environment variables.');
+  if (!secrets.googleSheetsClientEmail || !secrets.googleSheetsPrivateKey || !secrets.googleSheetsSheetId) {
+    throw new Error('Google Sheets API credentials or Sheet ID are not set. Add GOOGLE_SHEETS_CLIENT_EMAIL, GOOGLE_SHEETS_PRIVATE_KEY, and GOOGLE_SHEETS_SHEET_ID to Supabase secrets.');
   }
 
   const auth = new google.auth.GoogleAuth({
     credentials: {
-      client_email: clientEmail,
-      private_key: privateKey.replace(/\\n/g, '\n'),
+      client_email: secrets.googleSheetsClientEmail,
+      private_key: secrets.googleSheetsPrivateKey.replace(/\\n/g, '\n'),
     },
     scopes: [
         'https://www.googleapis.com/auth/spreadsheets',
@@ -43,9 +85,9 @@ const getAuth = async () => {
   return auth;
 };
 
-const getSheetId = () => {
-  const { sheetId } = getCredentials();
-  return sheetId;
+const getSheetId = async () => {
+  const secrets = await getGoogleSheetsSecrets();
+  return secrets.googleSheetsSheetId;
 };
 
 const getSheets = async () => {
@@ -141,7 +183,7 @@ function parseExpenseRows(rows: any[][] | null | undefined): Expense[] {
 
 export async function getExpenses(year: number): Promise<Expense[]> {
   const sheets = await getSheets();
-  const sheetId = getSheetId();
+  const sheetId = await getSheetId();
 
   if (!sheetId) {
     throw new Error('Google Sheets Sheet ID not configured');
@@ -197,7 +239,7 @@ export async function getExpenses(year: number): Promise<Expense[]> {
 
 export async function addExpense(expense: Omit<Expense, 'id'>): Promise<Expense> {
   const sheets = await getSheets();
-  const sheetId = getSheetId();
+  const sheetId = await getSheetId();
 
   if (!sheetId) {
     throw new Error('Google Sheets Sheet ID not configured');
@@ -260,7 +302,7 @@ async function findRowById(sheets: any, sheetId: string, rangeName: string, id: 
 
 export async function updateExpense(expense: Expense): Promise<Expense> {
   const sheets = await getSheets();
-  const sheetId = getSheetId();
+  const sheetId = await getSheetId();
 
   if (!sheetId) {
     throw new Error('Google Sheets Sheet ID not configured');
@@ -297,7 +339,7 @@ export async function updateExpense(expense: Expense): Promise<Expense> {
 
 export async function deleteExpense(expense: Expense, year?: number): Promise<void> {
   const sheets = await getSheets();
-  const sheetId = getSheetId();
+  const sheetId = await getSheetId();
 
   if (!sheetId) {
     throw new Error('Google Sheets Sheet ID not configured');
@@ -344,7 +386,7 @@ export async function deleteExpense(expense: Expense, year?: number): Promise<vo
 export async function getCategories(): Promise<string[]> {
     try {
         const sheets = await getSheets();
-        const sheetId = getSheetId();
+        const sheetId = await getSheetId();
 
         if (!sheetId) return [];
 
@@ -368,7 +410,7 @@ export async function getCategories(): Promise<string[]> {
 
 export async function addCategory(categoryName: string): Promise<void> {
     const sheets = await getSheets();
-    const sheetId = getSheetId();
+    const sheetId = await getSheetId();
 
     if (!sheetId) {
       throw new Error('Google Sheets Sheet ID not configured');
@@ -388,7 +430,7 @@ export async function addCategory(categoryName: string): Promise<void> {
 
 export async function deleteCategory(categoryName: string): Promise<void> {
     const sheets = await getSheets();
-    const sheetId = getSheetId();
+    const sheetId = await getSheetId();
 
     if (!sheetId) {
       throw new Error('Google Sheets Sheet ID not configured');
@@ -441,7 +483,7 @@ export async function deleteCategory(categoryName: string): Promise<void> {
 export async function getBudgets(): Promise<Budget[]> {
     try {
         const sheets = await getSheets();
-        const sheetId = getSheetId();
+        const sheetId = await getSheetId();
 
         if (!sheetId) return [];
 
@@ -468,7 +510,7 @@ export async function getBudgets(): Promise<Budget[]> {
 
 export async function updateBudgets(budgets: Budget[]): Promise<void> {
     const sheets = await getSheets();
-    const sheetId = getSheetId();
+    const sheetId = await getSheetId();
 
     if (!sheetId) {
       throw new Error('Google Sheets Sheet ID not configured');
@@ -500,7 +542,7 @@ const MASTER_PASSWORD_KEY = "masterPassword";
 export async function getMasterPassword(): Promise<string | null> {
     try {
         const sheets = await getSheets();
-        const sheetId = getSheetId();
+        const sheetId = await getSheetId();
 
         if (!sheetId) return null;
 
@@ -527,7 +569,7 @@ export async function getMasterPassword(): Promise<string | null> {
 
 export async function setMasterPassword(password: string): Promise<void> {
     const sheets = await getSheets();
-    const sheetId = getSheetId();
+    const sheetId = await getSheetId();
 
     if (!sheetId) {
       throw new Error('Google Sheets Sheet ID not configured');
@@ -567,7 +609,7 @@ export async function setMasterPassword(password: string): Promise<void> {
 export async function getYearsWithExpenses(): Promise<number[]> {
     try {
         const sheets = await getSheets();
-        const sheetId = getSheetId();
+        const sheetId = await getSheetId();
 
         if (!sheetId) return [new Date().getFullYear()];
 
@@ -592,7 +634,7 @@ export async function getYearsWithExpenses(): Promise<number[]> {
 export async function searchAllExpenses(query: string): Promise<Omit<Expense, 'id' | 'paid'>[]> {
   try {
     const sheets = await getSheets();
-    const sheetId = getSheetId();
+    const sheetId = await getSheetId();
 
     if (!sheetId) return [];
 
@@ -805,7 +847,7 @@ function parseImportantDateRows(rows: any[][] | null | undefined): ImportantDate
 export async function getImportantDates(sheetName: string): Promise<ImportantDate[]> {
     try {
         const sheets = await getSheets();
-        const sheetId = getSheetId();
+        const sheetId = await getSheetId();
 
         if (!sheetId) return [];
 
@@ -825,7 +867,7 @@ export async function getImportantDates(sheetName: string): Promise<ImportantDat
 
 export async function addImportantDate(sheetName: string, dateData: Omit<ImportantDate, 'id'>): Promise<ImportantDate> {
     const sheets = await getSheets();
-    const sheetId = getSheetId();
+    const sheetId = await getSheetId();
 
     if (!sheetId) {
       throw new Error('Google Sheets Sheet ID not configured');
@@ -859,7 +901,7 @@ export async function addImportantDate(sheetName: string, dateData: Omit<Importa
 
 export async function updateImportantDate(sheetName: string, dateData: ImportantDate): Promise<ImportantDate> {
     const sheets = await getSheets();
-    const sheetId = getSheetId();
+    const sheetId = await getSheetId();
 
     if (!sheetId) {
       throw new Error('Google Sheets Sheet ID not configured');
@@ -888,7 +930,7 @@ export async function updateImportantDate(sheetName: string, dateData: Important
 
 export async function deleteImportantDate(sheetName: string, dateData: ImportantDate): Promise<void> {
     const sheets = await getSheets();
-    const sheetId = getSheetId();
+    const sheetId = await getSheetId();
 
     if (!sheetId) {
       throw new Error('Google Sheets Sheet ID not configured');
@@ -952,7 +994,7 @@ function parseNoteRows(rows: any[][] | null | undefined): Note[] {
 export async function getNotes(): Promise<Note[]> {
     try {
         const sheets = await getSheets();
-        const sheetId = getSheetId();
+        const sheetId = await getSheetId();
 
         if (!sheetId) return [];
 
@@ -973,7 +1015,7 @@ export async function getNotes(): Promise<Note[]> {
 
 export async function addNote(noteData: Omit<Note, 'id'>): Promise<Note> {
     const sheets = await getSheets();
-    const sheetId = getSheetId();
+    const sheetId = await getSheetId();
 
     if (!sheetId) {
       throw new Error('Google Sheets Sheet ID not configured');
@@ -1008,7 +1050,7 @@ export async function addNote(noteData: Omit<Note, 'id'>): Promise<Note> {
 
 export async function updateNote(noteData: Note): Promise<Note> {
     const sheets = await getSheets();
-    const sheetId = getSheetId();
+    const sheetId = await getSheetId();
 
     if (!sheetId) {
       throw new Error('Google Sheets Sheet ID not configured');
@@ -1038,7 +1080,7 @@ export async function updateNote(noteData: Note): Promise<Note> {
 
 export async function deleteNote(noteId: string): Promise<void> {
     const sheets = await getSheets();
-    const sheetId = getSheetId();
+    const sheetId = await getSheetId();
 
     if (!sheetId) {
       throw new Error('Google Sheets Sheet ID not configured');
