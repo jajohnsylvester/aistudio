@@ -5,7 +5,11 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown, AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key, Shield, RefreshCcw } from 'lucide-react';
+import {
+  Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown,
+  AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
+  Shield, RefreshCcw, Server, Bot, Database, Zap,
+} from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
@@ -17,8 +21,9 @@ interface MCPStatus {
   apiKeyConfigured: boolean;
   secretConfigured: boolean;
   geminiKeyConfigured?: boolean;
-  perplexityKeyConfigured?: boolean;
+  proxyConfigured?: boolean;
   timestamp?: string;
+  tools?: string[];
   error?: string;
 }
 
@@ -41,9 +46,37 @@ interface PortfolioData {
   totalPnlPercent: number;
   holdings: Holding[];
   insights: string;
+  agentModel?: string;
+  source?: string;
   lastUpdated: string;
   error?: string;
   oauthRequired?: boolean;
+  tokenExpired?: boolean;
+}
+
+function StatusIndicator({ ok, label, subtext, warn = false }: {
+  ok: boolean | undefined;
+  label: string;
+  subtext: string;
+  warn?: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-3">
+      {ok ? (
+        <CheckCircle className="h-5 w-5 text-green-500 flex-shrink-0" />
+      ) : warn ? (
+        <AlertCircle className="h-5 w-5 text-yellow-500 flex-shrink-0" />
+      ) : (
+        <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />
+      )}
+      <div>
+        <p className="text-sm font-medium leading-none">{label}</p>
+        <p className={`text-xs mt-0.5 ${ok ? 'text-green-600 dark:text-green-400' : warn ? 'text-yellow-600 dark:text-yellow-400' : 'text-destructive'}`}>
+          {subtext}
+        </p>
+      </div>
+    </div>
+  );
 }
 
 export default function PaytmPortfolioPage() {
@@ -57,17 +90,13 @@ export default function PaytmPortfolioPage() {
   const checkStatus = useCallback(async () => {
     setIsLoadingStatus(true);
     try {
-      const response = await fetch('/api/paytm-portfolio?action=status');
+      const response = await fetch('/api/paytm-mcp?action=status');
       const data = await response.json();
       setStatus(data);
     } catch (error) {
-      console.error('Status check error:', error);
       setStatus({
-        connected: false,
-        hasAccessToken: false,
-        tokenExpired: true,
-        apiKeyConfigured: false,
-        secretConfigured: false,
+        connected: false, hasAccessToken: false, tokenExpired: true,
+        apiKeyConfigured: false, secretConfigured: false,
         error: error instanceof Error ? error.message : 'Unknown error',
       });
     } finally {
@@ -79,39 +108,24 @@ export default function PaytmPortfolioPage() {
     setIsLoadingPortfolio(true);
     setPortfolioError(null);
     try {
-      const response = await fetch('/api/paytm-portfolio?action=portfolio');
+      const response = await fetch('/api/paytm-agent?action=portfolio');
       const data = await response.json();
 
       if (data.error) {
         setPortfolioError(data.error);
         setPortfolio(null);
-
-        if (data.oauthRequired) {
-          toast({
-            title: 'OAuth Required',
-            description: 'Please login with Paytm Money to view your portfolio',
-          });
-        } else {
-          toast({
-            variant: 'destructive',
-            title: 'Error Loading Portfolio',
-            description: data.error,
-          });
+        if (!data.oauthRequired) {
+          toast({ variant: 'destructive', title: 'Error Loading Portfolio', description: data.error });
         }
       } else {
         setPortfolio(data);
         setPortfolioError(null);
       }
     } catch (error) {
-      console.error('Portfolio fetch error:', error);
-      const errorMsg = error instanceof Error ? error.message : 'Failed to fetch portfolio data';
-      setPortfolioError(errorMsg);
+      const msg = error instanceof Error ? error.message : 'Failed to fetch portfolio';
+      setPortfolioError(msg);
       setPortfolio(null);
-      toast({
-        variant: 'destructive',
-        title: 'Error',
-        description: errorMsg,
-      });
+      toast({ variant: 'destructive', title: 'Error', description: msg });
     } finally {
       setIsLoadingPortfolio(false);
     }
@@ -119,182 +133,117 @@ export default function PaytmPortfolioPage() {
 
   const startOAuthFlow = async () => {
     try {
-      const response = await fetch('/api/paytm-portfolio?action=login_url');
+      const response = await fetch('/api/paytm-mcp?action=login_url');
       const data = await response.json();
-
-      if (data.error) {
-        throw new Error(data.error);
-      }
-
-      if (data.login_url) {
-        window.open(data.login_url, '_blank');
-      }
+      if (data.error) throw new Error(data.error);
+      if (data.login_url) window.open(data.login_url, '_blank');
     } catch (error) {
-      toast({
-        variant: 'destructive',
-        title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to get login URL',
-      });
+      toast({ variant: 'destructive', title: 'Error', description: error instanceof Error ? error.message : 'Failed to get login URL' });
     }
   };
 
-  const clearTokenAndReauth = async () => {
-    setPortfolioError(null);
-    setPortfolio(null);
-    setStatus(prev => prev ? { ...prev, hasAccessToken: false } : null);
-    toast({
-      title: 'Re-authentication Required',
-      description: 'Click "Login with Paytm Money" to generate a new access token',
-    });
-  };
+  useEffect(() => { checkStatus(); }, [checkStatus]);
 
   useEffect(() => {
-    checkStatus();
-  }, [checkStatus]);
+    if (status?.hasAccessToken && !status?.tokenExpired) fetchPortfolio();
+  }, [status?.hasAccessToken, status?.tokenExpired, fetchPortfolio]);
 
-  useEffect(() => {
-    if (status?.hasAccessToken) {
-      fetchPortfolio();
-    }
-  }, [status?.hasAccessToken, fetchPortfolio]);
+  const formatCurrency = (value: number) =>
+    new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 2 }).format(value);
 
-  const formatCurrency = (value: number) => {
-    return new Intl.NumberFormat('en-IN', {
-      style: 'currency',
-      currency: 'INR',
-      minimumFractionDigits: 2,
-    }).format(value);
-  };
+  const formatPercent = (value: number) => `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
 
-  const formatPercent = (value: number) => {
-    const sign = value >= 0 ? '+' : '';
-    return `${sign}${value.toFixed(2)}%`;
-  };
-
-  // Check if error indicates token issue
-  const isTokenError = portfolioError?.includes('400') ||
-                       portfolioError?.includes('401') ||
+  const isTokenError = portfolioError?.includes('expired') ||
                        portfolioError?.includes('token') ||
-                       portfolioError?.includes('session') ||
-                       portfolioError?.includes('PM_OPEN_API');
+                       portfolioError?.includes('authenticate') ||
+                       portfolioError?.includes('401') ||
+                       portfolioError?.includes('400');
+
+  const needsAuth = status && status.apiKeyConfigured && status.secretConfigured &&
+                    (!status.hasAccessToken || status.tokenExpired);
+
+  const handleRefresh = () => {
+    checkStatus();
+    if (status?.hasAccessToken && !status?.tokenExpired) fetchPortfolio();
+  };
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight font-headline">
-            Paytm Money Portfolio
-          </h1>
-          <p className="text-muted-foreground">
-            Your stock holdings powered by Paytm Money API
+          <h1 className="text-3xl font-bold tracking-tight">Paytm Money Portfolio</h1>
+          <p className="text-muted-foreground text-sm mt-1">
+            Powered by Google ADK + Gemini 2.5 Flash + Embedded Paytm MCP Server
           </p>
         </div>
-        <Button
-          variant="outline"
-          onClick={() => {
-            checkStatus();
-            if (status?.hasAccessToken) {
-              fetchPortfolio();
-            }
-          }}
-          disabled={isLoadingStatus || isLoadingPortfolio}
-        >
-          {(isLoadingStatus || isLoadingPortfolio) ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          ) : (
-            <RefreshCw className="mr-2 h-4 w-4" />
-          )}
+        <Button variant="outline" onClick={handleRefresh} disabled={isLoadingStatus || isLoadingPortfolio}>
+          {(isLoadingStatus || isLoadingPortfolio)
+            ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            : <RefreshCw className="mr-2 h-4 w-4" />}
           Refresh
         </Button>
       </div>
 
-      {/* Status Card */}
+      {/* Server Status Card */}
       <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Wallet className="h-5 w-5" />
+        <CardHeader className="pb-3">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Server className="h-4 w-4" />
             Server Status
           </CardTitle>
-          <CardDescription>
-            Credentials are securely stored in Supabase secrets
-          </CardDescription>
+          <CardDescription>Credentials are securely stored as environment variables</CardDescription>
         </CardHeader>
         <CardContent>
           {isLoadingStatus ? (
-            <div className="flex items-center justify-center py-4">
-              <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <div className="flex items-center justify-center py-6">
+              <Loader2 className="h-7 w-7 animate-spin text-primary" />
             </div>
           ) : (
             <div className="space-y-4">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div className="flex items-center gap-2">
-                  {status?.apiKeyConfigured ? (
-                    <CheckCircle className="h-5 w-5 text-green-500" />
-                  ) : (
-                    <AlertCircle className="h-5 w-5 text-destructive" />
-                  )}
-                  <div>
-                    <p className="text-sm font-medium">API Key</p>
-                    <p className={`text-xs ${status?.apiKeyConfigured ? 'text-green-600' : 'text-destructive'}`}>
-                      {status?.apiKeyConfigured ? 'Secured' : 'Missing'}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {status?.secretConfigured ? (
-                    <CheckCircle className="h-5 w-5 text-green-500" />
-                  ) : (
-                    <AlertCircle className="h-5 w-5 text-destructive" />
-                  )}
-                  <div>
-                    <p className="text-sm font-medium">API Secret</p>
-                    <p className={`text-xs ${status?.secretConfigured ? 'text-green-600' : 'text-destructive'}`}>
-                      {status?.secretConfigured ? 'Secured' : 'Missing'}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {status?.hasAccessToken && !status?.tokenExpired ? (
-                    <CheckCircle className="h-5 w-5 text-green-500" />
-                  ) : status?.hasAccessToken && status?.tokenExpired ? (
-                    <AlertCircle className="h-5 w-5 text-orange-500" />
-                  ) : (
-                    <AlertCircle className="h-5 w-5 text-yellow-500" />
-                  )}
-                  <div>
-                    <p className="text-sm font-medium">Access Token</p>
-                    <p className={`text-xs ${
-                      status?.hasAccessToken && !status?.tokenExpired ? 'text-green-600' :
-                      status?.hasAccessToken && status?.tokenExpired ? 'text-orange-600' : 'text-yellow-600'
-                    }`}>
-                      {status?.hasAccessToken && !status?.tokenExpired ? 'Active' :
-                       status?.hasAccessToken && status?.tokenExpired ? `Expired ${status?.tokenExpiresAt ? new Date(status.tokenExpiresAt).toLocaleString() : ''}` : 'OAuth Required'}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {status?.geminiKeyConfigured ? (
-                    <CheckCircle className="h-5 w-5 text-green-500" />
-                  ) : (
-                    <AlertCircle className="h-5 w-5 text-yellow-500" />
-                  )}
-                  <div>
-                    <p className="text-sm font-medium">Gemini AI</p>
-                    <p className={`text-xs ${status?.geminiKeyConfigured ? 'text-green-600' : 'text-yellow-600'}`}>
-                      {status?.geminiKeyConfigured ? 'Configured' : 'Optional'}
-                    </p>
-                  </div>
-                </div>
+                <StatusIndicator
+                  ok={status?.apiKeyConfigured}
+                  label="API Key"
+                  subtext={status?.apiKeyConfigured ? 'Secured' : 'Missing'}
+                />
+                <StatusIndicator
+                  ok={status?.secretConfigured}
+                  label="API Secret"
+                  subtext={status?.secretConfigured ? 'Secured' : 'Missing'}
+                />
+                <StatusIndicator
+                  ok={status?.hasAccessToken && !status?.tokenExpired}
+                  warn={!status?.hasAccessToken || status?.tokenExpired}
+                  label="Access Token"
+                  subtext={
+                    status?.hasAccessToken && !status?.tokenExpired ? 'Active' :
+                    status?.hasAccessToken && status?.tokenExpired ? 'Expired' : 'OAuth Required'
+                  }
+                />
+                <StatusIndicator
+                  ok={status?.geminiKeyConfigured}
+                  warn={!status?.geminiKeyConfigured}
+                  label="Gemini AI"
+                  subtext={status?.geminiKeyConfigured ? 'Configured' : 'Optional'}
+                />
               </div>
 
               {status?.apiKeyConfigured && status?.secretConfigured && (
-                <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-950 rounded-lg">
+                <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-950/40 rounded-lg border border-green-200 dark:border-green-800">
                   <Shield className="h-4 w-4 text-green-600 flex-shrink-0" />
                   <p className="text-xs text-green-700 dark:text-green-400">
-                    API credentials are securely stored in Supabase Edge Function secrets
+                    API credentials are securely stored in application environment variables
+                  </p>
+                </div>
+              )}
+
+              {/* MCP Server info */}
+              {status?.tools && status.tools.length > 0 && (
+                <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-950/40 rounded-lg border border-blue-200 dark:border-blue-800">
+                  <Bot className="h-4 w-4 text-blue-600 flex-shrink-0" />
+                  <p className="text-xs text-blue-700 dark:text-blue-400">
+                    MCP Server active with {status.tools.length} tools: {status.tools.join(', ')}
                   </p>
                 </div>
               )}
@@ -309,91 +258,69 @@ export default function PaytmPortfolioPage() {
         </CardContent>
       </Card>
 
-      {/* Credentials Missing */}
+      {/* Missing Credentials */}
       {status && (!status.apiKeyConfigured || !status.secretConfigured) && !isLoadingStatus && (
-        <Card className="border-destructive">
+        <Card className="border-destructive/50">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <AlertCircle className="h-5 w-5 text-destructive" />
+            <CardTitle className="flex items-center gap-2 text-destructive">
+              <AlertCircle className="h-5 w-5" />
               Setup Required
             </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-sm text-muted-foreground">
-              Paytm Money API credentials need to be configured in Supabase secrets:
-            </p>
-            <div className="bg-muted p-4 rounded-lg space-y-2 text-sm">
-              <p className="font-medium">Add these secrets in Supabase Dashboard:</p>
-              <ul className="ml-4 space-y-1 list-disc">
-                <li><code>PAYTM_MONEY_API_KEY</code> - Your Paytm API key</li>
-                <li><code>PAYTM_MONEY_SECRET</code> - Your Paytm API secret</li>
-              </ul>
-              <p className="text-muted-foreground text-xs mt-2">
-                Dashboard: Project Settings → Edge Functions → Secrets Management
-              </p>
+          <CardContent className="space-y-3">
+            <p className="text-sm text-muted-foreground">Set the following environment variables:</p>
+            <div className="bg-muted rounded-lg p-3 font-mono text-xs space-y-1">
+              <p>PAYTM_MONEY_API_KEY=<span className="text-muted-foreground">your_api_key</span></p>
+              <p>PAYTM_MONEY_SECRET=<span className="text-muted-foreground">your_api_secret</span></p>
+              <p>GEMINI_API_KEY=<span className="text-muted-foreground">your_gemini_key</span></p>
+              <p>WEBSHARE_PROXY_URL=<span className="text-muted-foreground">optional_proxy_url</span></p>
             </div>
-            <Button asChild>
-              <a href="https://supabase.com/dashboard" target="_blank" rel="noopener noreferrer">
-                <ExternalLink className="mr-2 h-4 w-4" />
-                Open Supabase Dashboard
-              </a>
-            </Button>
           </CardContent>
         </Card>
       )}
 
-      {/* OAuth Required or Token Expired */}
-      {status?.apiKeyConfigured && status?.secretConfigured && (!status.hasAccessToken || status.tokenExpired) && !isLoadingStatus && (
-        <Card className={status.tokenExpired ? "border-orange-500/50" : "border-yellow-500/50"}>
+      {/* OAuth Required / Token Expired */}
+      {needsAuth && !isLoadingStatus && (
+        <Card className={`${status?.tokenExpired ? 'border-orange-400/50' : 'border-yellow-400/50'}`}>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Key className={status.tokenExpired ? "h-5 w-5 text-orange-500" : "h-5 w-5 text-yellow-500"} />
-              {status.tokenExpired ? 'Session Expired' : 'OAuth Authentication Required'}
+              <Key className={`h-5 w-5 ${status?.tokenExpired ? 'text-orange-500' : 'text-yellow-500'}`} />
+              {status?.tokenExpired ? 'Session Expired' : 'Authentication Required'}
             </CardTitle>
             <CardDescription>
-              {status.tokenExpired
-                ? `Your access token expired. Please re-authenticate to view your portfolio.`
-                : 'Connect your Paytm Money account to view your portfolio'}
+              {status?.tokenExpired
+                ? 'Your access token has expired. Please re-authenticate to continue.'
+                : 'Connect your Paytm Money account to view your portfolio.'}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {status.tokenExpired && status.tokenExpiresAt && (
-              <div className="p-3 bg-orange-50 dark:bg-orange-950 rounded-lg">
-                <p className="text-sm text-orange-700 dark:text-orange-400">
+            {status?.tokenExpired && status?.tokenExpiresAt && (
+              <div className="p-3 bg-orange-50 dark:bg-orange-950/40 rounded-lg border border-orange-200 dark:border-orange-800">
+                <p className="text-xs text-orange-700 dark:text-orange-400">
                   Token expired at: {new Date(status.tokenExpiresAt).toLocaleString()}
                 </p>
               </div>
             )}
-            <p className="text-sm text-muted-foreground">
-              Click the button below to {status.tokenExpired ? 're-authenticate' : 'login'} with your Paytm Money account.
-              After authentication, your access token will be securely stored.
-            </p>
             <Button onClick={startOAuthFlow} className="w-full" size="lg">
               <ExternalLink className="mr-2 h-4 w-4" />
-              {status.tokenExpired ? 'Re-authenticate with Paytm Money' : 'Login with Paytm Money'}
+              {status?.tokenExpired ? 'Re-authenticate with Paytm Money' : 'Login with Paytm Money'}
             </Button>
-            <div className="bg-muted p-3 rounded-lg text-xs text-muted-foreground">
-              <p className="font-medium mb-1">How it works:</p>
-              <ol className="list-decimal list-inside space-y-1">
-                <li>Click "{status.tokenExpired ? 'Re-authenticate' : 'Login'} with Paytm Money"</li>
-                <li>Enter your Paytm Money credentials</li>
-                <li>Access token is saved securely</li>
-                <li>Your portfolio loads automatically</li>
-              </ol>
-            </div>
-            <div className="flex items-center gap-2 p-3 bg-blue-50 dark:bg-blue-950 rounded-lg">
-              <AlertCircle className="h-4 w-4 text-blue-600 flex-shrink-0" />
-              <p className="text-xs text-blue-700 dark:text-blue-400">
-                Make sure your redirect URL in Paytm developer portal is set to: <code className="break-all">{typeof window !== 'undefined' ? window.location.origin : ''}/auth/callback</code>
+            <div className="flex items-start gap-2 p-3 bg-muted rounded-lg">
+              <AlertCircle className="h-4 w-4 text-muted-foreground flex-shrink-0 mt-0.5" />
+              <p className="text-xs text-muted-foreground">
+                Redirect URL for Paytm developer portal:{' '}
+                <code className="break-all font-mono">
+                  {typeof window !== 'undefined' ? window.location.origin : ''}/paytm-portfolio/callback
+                </code>
               </p>
             </div>
           </CardContent>
         </Card>
       )}
 
-      {/* Portfolio Error - Token expired or API error */}
+      {/* Portfolio Error (token expired while viewing) */}
       {status?.hasAccessToken && portfolioError && !isLoadingPortfolio && (
-        <Card className="border-orange-500/50">
+        <Card className="border-orange-400/50">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <AlertCircle className="h-5 w-5 text-orange-500" />
@@ -402,44 +329,25 @@ export default function PaytmPortfolioPage() {
             <CardDescription>
               {isTokenError
                 ? 'Your access token may have expired. Please re-authenticate.'
-                : 'Unable to fetch your portfolio data'}
+                : 'Unable to fetch your portfolio data from Paytm Money.'}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="p-3 bg-muted rounded-lg">
-              <p className="text-sm font-medium mb-1">Error details:</p>
-              <p className="text-xs text-muted-foreground font-mono break-all">{portfolioError}</p>
+              <p className="text-xs font-medium mb-1">Error details:</p>
+              <p className="text-xs font-mono text-muted-foreground break-all">{portfolioError}</p>
             </div>
-
-            {isTokenError ? (
-              <div className="space-y-3">
-                <p className="text-sm text-muted-foreground">
-                  Paytm Money access tokens can expire. Click below to re-authenticate.
-                </p>
-                <div className="flex gap-2">
-                  <Button onClick={startOAuthFlow} className="flex-1">
-                    <RefreshCcw className="mr-2 h-4 w-4" />
-                    Re-authenticate
-                  </Button>
-                  <Button variant="outline" onClick={fetchPortfolio}>
-                    <RefreshCw className="mr-2 h-4 w-4" />
-                    Retry
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex gap-2">
-                <Button onClick={fetchPortfolio}>
-                  <RefreshCw className="mr-2 h-4 w-4" />
-                  Try Again
-                </Button>
-                <Button variant="outline" onClick={clearTokenAndReauth}>
-                  Re-authenticate
-                </Button>
-              </div>
-            )}
-
-            <div className="flex items-start gap-2 p-3 bg-blue-50 dark:bg-blue-950 rounded-lg">
+            <div className="flex gap-2">
+              <Button onClick={startOAuthFlow} className="flex-1" disabled={isLoadingPortfolio}>
+                <RefreshCcw className="mr-2 h-4 w-4" />
+                Re-authenticate
+              </Button>
+              <Button variant="outline" onClick={fetchPortfolio} disabled={isLoadingPortfolio}>
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Retry
+              </Button>
+            </div>
+            <div className="flex items-start gap-2 p-3 bg-blue-50 dark:bg-blue-950/40 rounded-lg border border-blue-200 dark:border-blue-800">
               <AlertCircle className="h-4 w-4 text-blue-600 flex-shrink-0 mt-0.5" />
               <div className="text-xs text-blue-700 dark:text-blue-400">
                 <p className="font-medium mb-1">Common causes:</p>
@@ -455,13 +363,46 @@ export default function PaytmPortfolioPage() {
         </Card>
       )}
 
-      {/* Portfolio Summary */}
+      {/* Loading State */}
+      {isLoadingPortfolio && (
+        <div className="flex flex-col items-center justify-center py-14 gap-4">
+          <div className="relative">
+            <Loader2 className="h-12 w-12 animate-spin text-primary" />
+            <Bot className="h-5 w-5 text-primary/60 absolute inset-0 m-auto" />
+          </div>
+          <div className="text-center">
+            <p className="text-muted-foreground font-medium">Fetching your portfolio...</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              Google ADK agent is calling Paytm Money MCP server
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Portfolio Data */}
       {status?.hasAccessToken && !status?.tokenExpired && portfolio && !portfolioError && (
         <>
+          {/* Source badge */}
+          {portfolio.source && (
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="flex items-center gap-1.5 py-1">
+                <Bot className="h-3 w-3" />
+                {portfolio.source}
+              </Badge>
+              {portfolio.agentModel && (
+                <Badge variant="outline" className="flex items-center gap-1.5 py-1">
+                  <Zap className="h-3 w-3" />
+                  {portfolio.agentModel}
+                </Badge>
+              )}
+            </div>
+          )}
+
+          {/* Summary Cards */}
           <div className="grid gap-4 md:grid-cols-4">
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium">Total Investment</CardTitle>
+                <CardTitle className="text-sm font-medium text-muted-foreground">Total Investment</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold">{formatCurrency(portfolio.totalInvestment)}</div>
@@ -470,21 +411,19 @@ export default function PaytmPortfolioPage() {
 
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium">Current Value</CardTitle>
+                <CardTitle className="text-sm font-medium text-muted-foreground">Current Value</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold">{formatCurrency(portfolio.totalCurrentValue)}</div>
               </CardContent>
             </Card>
 
-            <Card className={portfolio.totalPnl >= 0 ? 'border-green-500/50' : 'border-destructive/50'}>
+            <Card className={portfolio.totalPnl >= 0 ? 'border-green-400/50' : 'border-destructive/50'}>
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium flex items-center gap-2">
-                  {portfolio.totalPnl >= 0 ? (
-                    <TrendingUp className="h-4 w-4 text-green-500" />
-                  ) : (
-                    <TrendingDown className="h-4 w-4 text-destructive" />
-                  )}
+                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
+                  {portfolio.totalPnl >= 0
+                    ? <TrendingUp className="h-4 w-4 text-green-500" />
+                    : <TrendingDown className="h-4 w-4 text-destructive" />}
                   Profit / Loss
                 </CardTitle>
               </CardHeader>
@@ -500,7 +439,10 @@ export default function PaytmPortfolioPage() {
 
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium">Holdings Count</CardTitle>
+                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
+                  <Database className="h-4 w-4" />
+                  Holdings
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="text-2xl font-bold">{portfolio.holdings?.length || 0}</div>
@@ -510,18 +452,18 @@ export default function PaytmPortfolioPage() {
           </div>
 
           {/* AI Insights */}
-          {status?.geminiKeyConfigured && portfolio.insights && (
-            <Card>
+          {portfolio.insights && (
+            <Card className="border-amber-200/50 dark:border-amber-800/30">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
-                  <Lightbulb className="h-5 w-5 text-yellow-500" />
+                  <Lightbulb className="h-5 w-5 text-amber-500" />
                   AI Portfolio Insights
                 </CardTitle>
-                <CardDescription>Powered by Gemini AI</CardDescription>
+                <CardDescription>Generated by Google ADK agent using {portfolio.agentModel || 'Gemini 2.5 Flash'}</CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="prose prose-sm max-w-none dark:prose-invert">
-                  <p className="whitespace-pre-wrap">{portfolio.insights}</p>
+                  <p className="whitespace-pre-wrap text-sm leading-relaxed">{portfolio.insights}</p>
                 </div>
               </CardContent>
             </Card>
@@ -530,16 +472,22 @@ export default function PaytmPortfolioPage() {
           {/* Holdings Table */}
           <Card>
             <CardHeader>
-              <CardTitle>Your Holdings</CardTitle>
-              <CardDescription>Your stock portfolio from Paytm Money</CardDescription>
+              <CardTitle className="flex items-center gap-2">
+                <Wallet className="h-5 w-5" />
+                Your Holdings
+              </CardTitle>
+              <CardDescription>
+                Live portfolio from Paytm Money via embedded MCP server
+              </CardDescription>
             </CardHeader>
             <CardContent>
               {portfolio.holdings?.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground">
+                <div className="text-center py-10 text-muted-foreground">
+                  <Wallet className="h-10 w-10 mx-auto mb-3 opacity-30" />
                   <p>No holdings found in your portfolio.</p>
                 </div>
               ) : (
-                <ScrollArea className="h-[400px]">
+                <ScrollArea className="h-[450px]">
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -554,18 +502,18 @@ export default function PaytmPortfolioPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {portfolio.holdings?.map((holding, index) => (
-                        <TableRow key={index}>
-                          <TableCell className="font-medium">{holding.trading_symbol}</TableCell>
-                          <TableCell><Badge variant="outline">{holding.exchange}</Badge></TableCell>
-                          <TableCell className="text-right">{holding.quantity}</TableCell>
-                          <TableCell className="text-right">{formatCurrency(holding.average_price)}</TableCell>
-                          <TableCell className="text-right">{formatCurrency(holding.last_price)}</TableCell>
-                          <TableCell className="text-right">{formatCurrency(holding.investment_value)}</TableCell>
-                          <TableCell className="text-right">{formatCurrency(holding.current_value)}</TableCell>
-                          <TableCell className={`text-right font-medium ${holding.pnl >= 0 ? 'text-green-600' : 'text-destructive'}`}>
-                            <div>{formatCurrency(holding.pnl)}</div>
-                            <div className="text-xs">{formatPercent(holding.pnl_percent)}</div>
+                      {portfolio.holdings?.map((h, i) => (
+                        <TableRow key={i}>
+                          <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
+                          <TableCell><Badge variant="outline" className="text-xs">{h.exchange}</Badge></TableCell>
+                          <TableCell className="text-right tabular-nums">{h.quantity}</TableCell>
+                          <TableCell className="text-right tabular-nums">{formatCurrency(h.average_price)}</TableCell>
+                          <TableCell className="text-right tabular-nums">{formatCurrency(h.last_price)}</TableCell>
+                          <TableCell className="text-right tabular-nums">{formatCurrency(h.investment_value)}</TableCell>
+                          <TableCell className="text-right tabular-nums">{formatCurrency(h.current_value)}</TableCell>
+                          <TableCell className={`text-right font-medium tabular-nums ${h.pnl >= 0 ? 'text-green-600' : 'text-destructive'}`}>
+                            <div>{formatCurrency(h.pnl)}</div>
+                            <div className="text-xs opacity-80">{formatPercent(h.pnl_percent)}</div>
                           </TableCell>
                         </TableRow>
                       ))}
@@ -574,21 +522,13 @@ export default function PaytmPortfolioPage() {
                 </ScrollArea>
               )}
               {portfolio.lastUpdated && (
-                <p className="text-xs text-muted-foreground mt-4">
+                <p className="text-xs text-muted-foreground mt-3 pt-3 border-t">
                   Last updated: {new Date(portfolio.lastUpdated).toLocaleString()}
                 </p>
               )}
             </CardContent>
           </Card>
         </>
-      )}
-
-      {/* Loading State */}
-      {isLoadingPortfolio && (
-        <div className="flex flex-col items-center justify-center py-12 gap-3">
-          <Loader2 className="h-12 w-12 animate-spin text-primary" />
-          <p className="text-muted-foreground">Loading your portfolio...</p>
-        </div>
       )}
     </div>
   );
