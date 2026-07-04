@@ -3,7 +3,7 @@ import type {NextConfig} from 'next';
 const nextConfig: NextConfig = {
   /* config options here */
   output: "standalone",
-  serverExternalPackages: ['googleapis', '@google/adk', '@google/genai', '@supabase/supabase-js'],
+  serverExternalPackages: ['googleapis', '@supabase/supabase-js'],
   typescript: {
     ignoreBuildErrors: true,
   },

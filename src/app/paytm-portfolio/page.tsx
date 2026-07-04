@@ -90,7 +90,7 @@ export default function PaytmPortfolioPage() {
   const checkStatus = useCallback(async () => {
     setIsLoadingStatus(true);
     try {
-      const response = await fetch('/api/paytm-mcp?action=status');
+      const response = await fetch('/api/paytm-portfolio?action=status');
       const data = await response.json();
       setStatus(data);
     } catch (error) {
@@ -108,7 +108,7 @@ export default function PaytmPortfolioPage() {
     setIsLoadingPortfolio(true);
     setPortfolioError(null);
     try {
-      const response = await fetch('/api/paytm-agent?action=portfolio');
+      const response = await fetch('/api/paytm-portfolio?action=portfolio');
       const data = await response.json();
 
       if (data.error) {
@@ -133,7 +133,7 @@ export default function PaytmPortfolioPage() {
 
   const startOAuthFlow = async () => {
     try {
-      const response = await fetch('/api/paytm-mcp?action=login_url');
+      const response = await fetch('/api/paytm-portfolio?action=login_url');
       const data = await response.json();
       if (data.error) throw new Error(data.error);
       if (data.login_url) window.open(data.login_url, '_blank');
