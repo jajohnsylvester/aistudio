@@ -1,4 +1,20 @@
-import { createClient } from '@supabase/supabase-js';
+/**
+ * Paytm Money Shared Utilities - In-Memory Token Storage
+ * No database dependency - tokens stored in process memory
+ */
+
+// In-memory token storage (persists for the lifetime of the server process)
+let tokenStore: {
+  access_token: string | null;
+  public_access_token: string | null;
+  read_access_token: string | null;
+  created_at: Date | null;
+} = {
+  access_token: null,
+  public_access_token: null,
+  read_access_token: null,
+  created_at: null,
+};
 
 export const PAYTM_API_HOST = 'https://developer.paytmmoney.com';
 export const PAYTM_LOGIN_URL = 'https://login.paytmmoney.com/merchant-login';
@@ -20,13 +36,6 @@ export const MCP_TOOLS = [
   { name: 'get_orders', description: 'Get order book' },
 ];
 
-function getSupabaseClient() {
-  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) throw new Error('Supabase not configured');
-  return createClient(url, key);
-}
-
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
     const parts = token.split('.');
@@ -39,6 +48,7 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 function isTokenExpired(token: string): boolean {
   const payload = decodeJwtPayload(token);
   if (!payload?.exp) return true;
+  // Consider token expired 5 minutes before actual expiry
   return Date.now() >= ((payload.exp as number) * 1000 - 5 * 60 * 1000);
 }
 
@@ -47,48 +57,57 @@ function getTokenExpiryTime(token: string): Date | null {
   return payload?.exp ? new Date((payload.exp as number) * 1000) : null;
 }
 
-export async function getAccessTokenFromDB() {
-  try {
-    const supabase = getSupabaseClient();
-    const { data, error } = await supabase
-      .from('paytm_access_tokens')
-      .select('access_token')
-      .eq('user_id', 'default')
-      .eq('is_active', true)
-      .order('updated_at', { ascending: false })
-      .limit(1)
-      .single();
-    if (error || !data) return { accessToken: null, isExpired: true, expiresAt: null };
-    return {
-      accessToken: data.access_token as string,
-      isExpired: isTokenExpired(data.access_token),
-      expiresAt: getTokenExpiryTime(data.access_token),
-    };
-  } catch { return { accessToken: null, isExpired: true, expiresAt: null }; }
+export async function getAccessTokenFromMemory() {
+  if (!tokenStore.access_token) {
+    return { accessToken: null, isExpired: true, expiresAt: null };
+  }
+
+  return {
+    accessToken: tokenStore.access_token,
+    isExpired: isTokenExpired(tokenStore.access_token),
+    expiresAt: getTokenExpiryTime(tokenStore.access_token),
+  };
 }
 
-export async function saveAccessTokenToDB(tokenData: { access_token: string; public_access_token?: string; read_access_token?: string }) {
-  const supabase = getSupabaseClient();
-  await supabase.from('paytm_access_tokens').update({ is_active: false }).eq('user_id', 'default');
-  const { error } = await supabase.from('paytm_access_tokens').insert({
-    user_id: 'default',
+export async function saveAccessTokenToMemory(tokenData: {
+  access_token: string;
+  public_access_token?: string;
+  read_access_token?: string;
+}) {
+  tokenStore = {
     access_token: tokenData.access_token,
     public_access_token: tokenData.public_access_token || null,
     read_access_token: tokenData.read_access_token || null,
-    is_active: true,
-  });
-  if (error) throw new Error(`Failed to save token: ${error.message}`);
+    created_at: new Date(),
+  };
 }
 
 export async function callPaytmAPI(endpoint: string, accessToken: string): Promise<unknown> {
+  const proxyUrl = process.env.WEBSHARE_PROXY_URL;
+
+  const headers: Record<string, string> = {
+    'Authorization': `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+  };
+
   const response = await fetch(`${PAYTM_API_HOST}${endpoint}`, {
-    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    headers,
   });
+
   if (!response.ok) {
-    if (response.status === 400 || response.status === 401) throw new Error('Access token expired. Please re-authenticate.');
+    if (response.status === 400 || response.status === 401) {
+      throw new Error('Access token expired. Please re-authenticate.');
+    }
+    if (response.status === 403) {
+      throw new Error('Access denied. Check API permissions.');
+    }
+    if (response.status === 429) {
+      throw new Error('Rate limit exceeded. Try again later.');
+    }
     const errorText = await response.text();
     throw new Error(`Paytm API error ${response.status}: ${errorText}`);
   }
+
   return response.json();
 }
 
