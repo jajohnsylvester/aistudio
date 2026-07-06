@@ -6,11 +6,10 @@ import {
 } from '@/lib/paytm-shared';
 
 const COOKIE_NAME = 'paytm_access_token';
-const CLOCK_TOLERANCE_SECONDS = 30; // 30-second window to prevent clock skew failures from server time deviations
+const CLOCK_TOLERANCE_SECONDS = 30; // OneUptime Clock Skew Buffer window config
 
 async function fetchHoldings(accessToken: string) {
   try {
-    // Explicit token header deployment verified through upstream proxy
     const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, accessToken);
     const rawHoldings = (holdingsRaw as { data?: { holdings?: unknown[] }; holdings?: unknown[] })?.data?.holdings ||
                         (holdingsRaw as { holdings?: unknown[] })?.holdings || [];
@@ -25,7 +24,7 @@ async function fetchHoldings(accessToken: string) {
       pnl_percent: parseFloat((h.pnl_percent || h.change_percent) as string) || 0,
     }));
   } catch (error: any) {
-    throw new Error(`Upstream API validation exception. Verify token string formatting. Msg: ${error.message}`);
+    throw new Error(`Upstream API evaluation exception. Verify x-jwt-token configuration metrics. Msg: ${error.message}`);
   }
 }
 
@@ -110,7 +109,6 @@ export async function GET(request: NextRequest) {
         secretConfigured: !!apiSecret,
         geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
         proxyConfigured: !!process.env.WEBSHARE_PROXY_URL,
-        // Exposing server clock context directly inside diagnostic status payloads
         serverTimestamp: new Date().toISOString(),
         clockToleranceConfigured: `${CLOCK_TOLERANCE_SECONDS}s`,
         tools: MCP_TOOLS.map(t => t.name),
@@ -131,9 +129,8 @@ export async function GET(request: NextRequest) {
     if (action === 'exchange_token') {
       const requestToken = searchParams.get('request_token');
       
-      // Strict guard against single-use re-evaluations
       if (!requestToken) {
-        return NextResponse.json({ error: 'Single-use request_token payload missing.' }, { status: 400 });
+        return NextResponse.json({ error: 'Single-use request_token query parameter missing.' }, { status: 400 });
       }
       if (!apiKey || !apiSecret) {
         return NextResponse.json({ error: 'API credentials not configured' }, { status: 500 });
@@ -152,7 +149,7 @@ export async function GET(request: NextRequest) {
       if (!response.ok) {
         const errText = await response.text();
         return NextResponse.json({ 
-          error: `Token exchange rejected. Ensure token single-use lifecycle limits haven't broken. Upstream details: ${errText}` 
+          error: `Token exchange failure. Confirm single-use constraints haven't drifted. Upstream logs: ${errText}` 
         }, { status: 500 });
       }
 
@@ -160,7 +157,6 @@ export async function GET(request: NextRequest) {
       const accessToken = (tokenData as { access_token?: string }).access_token;
       
       if (accessToken) {
-        // Enforce clock tolerance limits by pruning maximum safe lifetime values out of payload window
         const targetExpiry = 86400 - CLOCK_TOLERANCE_SECONDS;
 
         cookieStore.set(COOKIE_NAME, accessToken, {
@@ -174,10 +170,10 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({
           success: true,
           hasAccessToken: true,
-          message: 'Access token securely persisted via browser context cookie metrics.',
+          message: 'Access token securely persisted via client context cookies.',
         });
       }
-      return NextResponse.json({ error: 'Property mapping matrix missed token context parameters.' }, { status: 500 });
+      return NextResponse.json({ error: 'Property mapping missed valid token payloads.' }, { status: 500 });
     }
 
     if (action === 'portfolio' || !action) {
@@ -217,7 +213,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    return NextResponse.json({ error: `Invalid action configuration mapping: ${action}` }, { status: 400 });
+    return NextResponse.json({ error: `Invalid action configuration: ${action}` }, { status: 400 });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     const isTokenError = message.includes('expired') ||
