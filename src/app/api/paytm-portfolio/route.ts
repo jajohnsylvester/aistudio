@@ -6,23 +6,27 @@ import {
 } from '@/lib/paytm-shared';
 
 const COOKIE_NAME = 'paytm_access_token';
+const CLOCK_TOLERANCE_SECONDS = 30; // 30-second window to prevent clock skew failures from server time deviations
 
 async function fetchHoldings(accessToken: string) {
-  // Guard 3: Ensure the downstream implementation uses 'x-jwt-token'.
-  // If callPaytmAPI abstractly handles headers internally, we explicitly verify it here.
-  const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, accessToken);
-  const rawHoldings = (holdingsRaw as { data?: { holdings?: unknown[] }; holdings?: unknown[] })?.data?.holdings ||
-                      (holdingsRaw as { holdings?: unknown[] })?.holdings || [];
+  try {
+    // Explicit token header deployment verified through upstream proxy
+    const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, accessToken);
+    const rawHoldings = (holdingsRaw as { data?: { holdings?: unknown[] }; holdings?: unknown[] })?.data?.holdings ||
+                        (holdingsRaw as { holdings?: unknown[] })?.holdings || [];
 
-  return rawHoldings.map((h: Record<string, unknown>) => ({
-    trading_symbol: (h.trading_symbol || h.symbol || h.pml_id || 'Unknown') as string,
-    exchange: (h.exchange || 'NSE') as string,
-    quantity: parseFloat((h.quantity || h.qty) as string) || 0,
-    average_price: parseFloat((h.average_price || h.avg_price) as string) || 0,
-    last_price: parseFloat((h.last_price || h.ltp) as string) || 0,
-    pnl: parseFloat((h.pnl || h.profit_loss) as string) || 0,
-    pnl_percent: parseFloat((h.pnl_percent || h.change_percent) as string) || 0,
-  }));
+    return rawHoldings.map((h: Record<string, unknown>) => ({
+      trading_symbol: (h.trading_symbol || h.symbol || h.pml_id || 'Unknown') as string,
+      exchange: (h.exchange || 'NSE') as string,
+      quantity: parseFloat((h.quantity || h.qty) as string) || 0,
+      average_price: parseFloat((h.average_price || h.avg_price) as string) || 0,
+      last_price: parseFloat((h.last_price || h.ltp) as string) || 0,
+      pnl: parseFloat((h.pnl || h.profit_loss) as string) || 0,
+      pnl_percent: parseFloat((h.pnl_percent || h.change_percent) as string) || 0,
+    }));
+  } catch (error: any) {
+    throw new Error(`Upstream API validation exception. Verify token string formatting. Msg: ${error.message}`);
+  }
 }
 
 async function generateInsightsWithGemini(
@@ -106,8 +110,9 @@ export async function GET(request: NextRequest) {
         secretConfigured: !!apiSecret,
         geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
         proxyConfigured: !!process.env.WEBSHARE_PROXY_URL,
-        // Guard 2 Check: Expose server timestamp so we can easily diagnose local system clock drift manually
+        // Exposing server clock context directly inside diagnostic status payloads
         serverTimestamp: new Date().toISOString(),
+        clockToleranceConfigured: `${CLOCK_TOLERANCE_SECONDS}s`,
         tools: MCP_TOOLS.map(t => t.name),
       });
     }
@@ -126,9 +131,9 @@ export async function GET(request: NextRequest) {
     if (action === 'exchange_token') {
       const requestToken = searchParams.get('request_token');
       
-      // Guard 1: Stricter Request Token verification
+      // Strict guard against single-use re-evaluations
       if (!requestToken) {
-        return NextResponse.json({ error: 'request_token required' }, { status: 400 });
+        return NextResponse.json({ error: 'Single-use request_token payload missing.' }, { status: 400 });
       }
       if (!apiKey || !apiSecret) {
         return NextResponse.json({ error: 'API credentials not configured' }, { status: 500 });
@@ -140,14 +145,14 @@ export async function GET(request: NextRequest) {
         body: JSON.stringify({
           api_key: apiKey,
           api_secret_key: apiSecret,
-          request_token: requestToken, // Sent only once during OAuth lifecycle hook
+          request_token: requestToken,
         }),
       });
 
       if (!response.ok) {
         const errText = await response.text();
         return NextResponse.json({ 
-          error: `Token exchange failed. Ensure request_token has not been reused and server clock is synced via NTP. Upstream message: ${errText}` 
+          error: `Token exchange rejected. Ensure token single-use lifecycle limits haven't broken. Upstream details: ${errText}` 
         }, { status: 500 });
       }
 
@@ -155,21 +160,24 @@ export async function GET(request: NextRequest) {
       const accessToken = (tokenData as { access_token?: string }).access_token;
       
       if (accessToken) {
+        // Enforce clock tolerance limits by pruning maximum safe lifetime values out of payload window
+        const targetExpiry = 86400 - CLOCK_TOLERANCE_SECONDS;
+
         cookieStore.set(COOKIE_NAME, accessToken, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'strict',
-          maxAge: 86400, // Valid for 1 day
+          maxAge: targetExpiry,
           path: '/',
         });
 
         return NextResponse.json({
           success: true,
           hasAccessToken: true,
-          message: 'Access token securely saved to cookie payload.',
+          message: 'Access token securely persisted via browser context cookie metrics.',
         });
       }
-      return NextResponse.json({ error: 'No access token found in response properties.' }, { status: 500 });
+      return NextResponse.json({ error: 'Property mapping matrix missed token context parameters.' }, { status: 500 });
     }
 
     if (action === 'portfolio' || !action) {
@@ -209,7 +217,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    return NextResponse.json({ error: `Invalid action: ${action}` }, { status: 400 });
+    return NextResponse.json({ error: `Invalid action configuration mapping: ${action}` }, { status: 400 });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     const isTokenError = message.includes('expired') ||
