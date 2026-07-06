@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
 import {
   PAYTM_LOGIN_URL, API_ROUTES, MCP_TOOLS,
-  getAccessTokenFromMemory, saveAccessTokenToMemory, callPaytmAPI, type Holding,
+  callPaytmAPI, type Holding,
 } from '@/lib/paytm-shared';
+
+const COOKIE_NAME = 'paytm_access_token';
 
 async function fetchHoldings(accessToken: string) {
   const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, accessToken);
   const rawHoldings = (holdingsRaw as { data?: { holdings?: unknown[] }; holdings?: unknown[] })?.data?.holdings ||
-                       (holdingsRaw as { holdings?: unknown[] })?.holdings || [];
+                      (holdingsRaw as { holdings?: unknown[] })?.holdings || [];
 
   return rawHoldings.map((h: Record<string, unknown>) => ({
     trading_symbol: (h.trading_symbol || h.symbol || h.pml_id || 'Unknown') as string,
@@ -86,15 +89,17 @@ export async function GET(request: NextRequest) {
   const action = searchParams.get('action');
   const apiKey = process.env.PAYTM_MONEY_API_KEY;
   const apiSecret = process.env.PAYTM_MONEY_SECRET;
+  
+  const cookieStore = await cookies();
+  const cookieToken = cookieStore.get(COOKIE_NAME);
 
   try {
     if (action === 'status') {
-      const tokenData = await getAccessTokenFromMemory();
       return NextResponse.json({
         connected: !!(apiKey && apiSecret),
-        hasAccessToken: !!tokenData.accessToken,
-        tokenExpired: tokenData.isExpired,
-        tokenExpiresAt: tokenData.expiresAt?.toISOString() || null,
+        hasAccessToken: !!cookieToken?.value,
+        tokenExpired: false, // Cookie expiration handling is managed by browser lifecycle maxAge
+        tokenExpiresAt: null,
         apiKeyConfigured: !!apiKey,
         secretConfigured: !!apiSecret,
         geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
@@ -140,34 +145,36 @@ export async function GET(request: NextRequest) {
       }
 
       const tokenData = await response.json();
-      if ((tokenData as { access_token?: string }).access_token) {
-        await saveAccessTokenToMemory(tokenData as { access_token: string; public_access_token?: string; read_access_token?: string });
+      const accessToken = (tokenData as { access_token?: string }).access_token;
+      
+      if (accessToken) {
+        // Persist the token to a cookie instead of serverless global memory
+        cookieStore.set(COOKIE_NAME, accessToken, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'strict',
+          maxAge: 86400, // Valid for 1 day
+          path: '/',
+        });
+
         return NextResponse.json({
           success: true,
           hasAccessToken: true,
-          message: 'Access token stored successfully in memory',
+          message: 'Access token stored successfully via HttpOnly cookie',
         });
       }
       return NextResponse.json({ error: 'No access token in response' }, { status: 500 });
     }
 
     if (action === 'portfolio' || !action) {
-      const tokenData = await getAccessTokenFromMemory();
-      if (!tokenData.accessToken) {
+      if (!cookieToken || !cookieToken.value) {
         return NextResponse.json({
           error: 'No access token found. Please complete OAuth authentication.',
           oauthRequired: true,
         }, { status: 401 });
       }
-      if (tokenData.isExpired) {
-        return NextResponse.json({
-          error: `Access token expired at ${tokenData.expiresAt?.toISOString()}. Please re-authenticate.`,
-          tokenExpired: true,
-          oauthRequired: true,
-        }, { status: 401 });
-      }
 
-      const rawHoldings = await fetchHoldings(tokenData.accessToken);
+      const rawHoldings = await fetchHoldings(cookieToken.value);
       const holdings: Holding[] = rawHoldings.map(h => ({
         ...h,
         current_value: h.quantity * h.last_price,
@@ -203,6 +210,12 @@ export async function GET(request: NextRequest) {
     const isTokenError = message.includes('expired') ||
                          message.includes('authenticate') ||
                          message.includes('token');
+                         
+    // Clean up broken cookie if we hit an upstream authentication exception
+    if (isTokenError) {
+      cookieStore.delete(COOKIE_NAME);
+    }
+
     return NextResponse.json({
       error: message,
       tokenExpired: isTokenError,
