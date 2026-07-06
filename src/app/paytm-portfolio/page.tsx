@@ -69,8 +69,6 @@ function StatusIndicator({ ok, label, subtext, warn = false }: {
         <AlertCircle className="h-5 w-5 text-yellow-500 flex-shrink-0" />
       ) : (
         <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />
-      ) : (
-        <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />
       )}
       <div>
         <p className="text-sm font-medium leading-none">{label}</p>
@@ -82,7 +80,7 @@ function StatusIndicator({ ok, label, subtext, warn = false }: {
   );
 }
 
-// Inner Content Component to safely isolate useSearchParams usage
+// Inner content using lookups
 function PaytmPortfolioContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -99,7 +97,7 @@ function PaytmPortfolioContent() {
     setIsLoadingStatus(true);
     try {
       const response = await fetch('/api/paytm-portfolio?action=status', {
-        credentials: 'include', // Cookie transmission alignment
+        credentials: 'include',
       });
       const data = await response.json();
       setStatus(data);
@@ -119,7 +117,7 @@ function PaytmPortfolioContent() {
     setPortfolioError(null);
     try {
       const response = await fetch('/api/paytm-portfolio?action=portfolio', {
-        credentials: 'include', // Cookie transmission alignment
+        credentials: 'include',
       });
       const data = await response.json();
 
@@ -143,7 +141,6 @@ function PaytmPortfolioContent() {
     }
   }, [toast]);
 
-  // Hook to handle incoming Request Token authentication lifecycle state change
   useEffect(() => {
     async function handleExchangeToken() {
       if (!requestToken) return;
@@ -165,10 +162,7 @@ function PaytmPortfolioContent() {
 
         toast({ title: 'Authentication Successful', description: 'Access token saved securely via cookie layers.' });
         
-        // Clean url params to avoid immediate dead parameter replay updates
         router.replace('/paytm-portfolio');
-        
-        // Trigger data sync loop refresh
         checkStatus();
       } catch (error: any) {
         toast({ variant: 'destructive', title: 'Exchange Error', description: error.message });
@@ -185,7 +179,7 @@ function PaytmPortfolioContent() {
       const response = await fetch('/api/paytm-portfolio?action=login_url', { credentials: 'include' });
       const data = await response.json();
       if (data.error) throw new Error(data.error);
-      if (data.login_url) window.open(data.login_url, '_self'); // Redirect inside parent window context gracefully
+      if (data.login_url) window.open(data.login_url, '_self');
     } catch (error) {
       toast({ variant: 'destructive', title: 'Error', description: error instanceof Error ? error.message : 'Failed to get login URL' });
     }
@@ -371,7 +365,7 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
-      {/* Portfolio Error (token expired while viewing) */}
+      {/* Portfolio Error */}
       {status?.hasAccessToken && portfolioError && !isLoadingPortfolio && (
         <Card className="border-orange-400/50">
           <CardHeader>
@@ -432,10 +426,9 @@ function PaytmPortfolioContent() {
         </div>
       )}
 
-      {/* Portfolio Data */}
+      {/* Portfolio Data Layout */}
       {status?.hasAccessToken && !status?.tokenExpired && portfolio && !portfolioError && (
         <>
-          {/* Source badge */}
           {portfolio.source && (
             <div className="flex items-center gap-2">
               <Badge variant="outline" className="flex items-center gap-1.5 py-1">
@@ -451,7 +444,7 @@ function PaytmPortfolioContent() {
             </div>
           )}
 
-          {/* Summary Cards */}
+          {/* Summary Metric Cards */}
           <div className="grid gap-4 md:grid-cols-4">
             <Card>
               <CardHeader className="pb-2">
@@ -504,7 +497,7 @@ function PaytmPortfolioContent() {
             </Card>
           </div>
 
-          {/* AI Insights */}
+          {/* AI Insights Card Component */}
           {portfolio.insights && (
             <Card className="border-amber-200/50 dark:border-amber-800/30">
               <CardHeader>
@@ -522,7 +515,7 @@ function PaytmPortfolioContent() {
             </Card>
           )}
 
-          {/* Holdings Table */}
+          {/* Core Holdings Table Container */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -587,7 +580,7 @@ function PaytmPortfolioContent() {
   );
 }
 
-// Default export wrapping the content with a proper Suspense Boundary to solve the bail-out issue
+// Global suspense fallback wrapper boundaries
 export default function PaytmPortfolioPage() {
   return (
     <Suspense
