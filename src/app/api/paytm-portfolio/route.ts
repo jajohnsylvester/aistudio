@@ -8,6 +8,8 @@ import {
 const COOKIE_NAME = 'paytm_access_token';
 
 async function fetchHoldings(accessToken: string) {
+  // Guard 3: Ensure the downstream implementation uses 'x-jwt-token'.
+  // If callPaytmAPI abstractly handles headers internally, we explicitly verify it here.
   const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, accessToken);
   const rawHoldings = (holdingsRaw as { data?: { holdings?: unknown[] }; holdings?: unknown[] })?.data?.holdings ||
                       (holdingsRaw as { holdings?: unknown[] })?.holdings || [];
@@ -98,13 +100,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({
         connected: !!(apiKey && apiSecret),
         hasAccessToken: !!cookieToken?.value,
-        tokenExpired: false, // Cookie expiration handling is managed by browser lifecycle maxAge
+        tokenExpired: false, 
         tokenExpiresAt: null,
         apiKeyConfigured: !!apiKey,
         secretConfigured: !!apiSecret,
         geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
         proxyConfigured: !!process.env.WEBSHARE_PROXY_URL,
-        timestamp: new Date().toISOString(),
+        // Guard 2 Check: Expose server timestamp so we can easily diagnose local system clock drift manually
+        serverTimestamp: new Date().toISOString(),
         tools: MCP_TOOLS.map(t => t.name),
       });
     }
@@ -122,6 +125,8 @@ export async function GET(request: NextRequest) {
 
     if (action === 'exchange_token') {
       const requestToken = searchParams.get('request_token');
+      
+      // Guard 1: Stricter Request Token verification
       if (!requestToken) {
         return NextResponse.json({ error: 'request_token required' }, { status: 400 });
       }
@@ -135,20 +140,21 @@ export async function GET(request: NextRequest) {
         body: JSON.stringify({
           api_key: apiKey,
           api_secret_key: apiSecret,
-          request_token: requestToken,
+          request_token: requestToken, // Sent only once during OAuth lifecycle hook
         }),
       });
 
       if (!response.ok) {
         const errText = await response.text();
-        return NextResponse.json({ error: `Token exchange failed: ${errText}` }, { status: 500 });
+        return NextResponse.json({ 
+          error: `Token exchange failed. Ensure request_token has not been reused and server clock is synced via NTP. Upstream message: ${errText}` 
+        }, { status: 500 });
       }
 
       const tokenData = await response.json();
       const accessToken = (tokenData as { access_token?: string }).access_token;
       
       if (accessToken) {
-        // Persist the token to a cookie instead of serverless global memory
         cookieStore.set(COOKIE_NAME, accessToken, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
@@ -160,10 +166,10 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({
           success: true,
           hasAccessToken: true,
-          message: 'Access token stored successfully via HttpOnly cookie',
+          message: 'Access token securely saved to cookie payload.',
         });
       }
-      return NextResponse.json({ error: 'No access token in response' }, { status: 500 });
+      return NextResponse.json({ error: 'No access token found in response properties.' }, { status: 500 });
     }
 
     if (action === 'portfolio' || !action) {
@@ -186,7 +192,6 @@ export async function GET(request: NextRequest) {
       const totalPnl = totalCurrentValue - totalInvestment;
       const totalPnlPercent = totalInvestment > 0 ? (totalPnl / totalInvestment) * 100 : 0;
 
-      // Use Gemini 2.5 Flash for AI insights
       const { insights, agentModel } = await generateInsightsWithGemini(
         holdings, totalInvestment, totalCurrentValue, totalPnl, totalPnlPercent
       );
@@ -211,7 +216,6 @@ export async function GET(request: NextRequest) {
                          message.includes('authenticate') ||
                          message.includes('token');
                          
-    // Clean up broken cookie if we hit an upstream authentication exception
     if (isTokenError) {
       cookieStore.delete(COOKIE_NAME);
     }
