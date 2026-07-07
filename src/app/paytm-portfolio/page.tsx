@@ -28,6 +28,7 @@ interface MCPStatus {
   apiKeyConfigured: boolean;
   secretConfigured: boolean;
   geminiKeyConfigured?: boolean;
+  proxyConfigured?: boolean;
   serverTimestamp?: string;
   jwtMeta?: JwtMetadata | null;
   tools?: string[];
@@ -121,6 +122,17 @@ function PaytmPortfolioContent() {
     }
   }, []);
 
+  const startOAuthFlow = async () => {
+    try {
+      const response = await fetch('/api/paytm-portfolio?action=login_url', { credentials: 'include' });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      if (data.login_url) window.open(data.login_url, '_self');
+    } catch (error: any) {
+      toast({ variant: 'destructive', title: 'Error', description: error.message || 'Failed to initialize OAuth flow' });
+    }
+  };
+
   useEffect(() => {
     async function handleExchangeToken() {
       if (!requestToken) return;
@@ -141,9 +153,11 @@ function PaytmPortfolioContent() {
   }, [requestToken, router, checkStatus, toast]);
 
   useEffect(() => { if (!requestToken) checkStatus(); }, [checkStatus, requestToken]);
-  useEffect(() => { if (status?.hasAccessToken && !requestToken) fetchPortfolio(); }, [status?.hasAccessToken, fetchPortfolio, requestToken]);
+  useEffect(() => { if (status?.hasAccessToken && !requestToken && !status?.tokenExpired) fetchPortfolio(); }, [status?.hasAccessToken, status?.tokenExpired, fetchPortfolio, requestToken]);
 
   const activeJwtMeta = portfolio?.jwtMeta || status?.jwtMeta;
+  const isTokenError = portfolioError?.includes('expired') || portfolioError?.includes('token') || portfolioError?.includes('401');
+  const needsAuth = status && status.apiKeyConfigured && status.secretConfigured && (!status.hasAccessToken || status.tokenExpired);
 
   return (
     <div className="flex flex-col gap-6">
@@ -152,19 +166,19 @@ function PaytmPortfolioContent() {
           <h1 className="text-3xl font-bold tracking-tight">Paytm Money Portfolio Terminal</h1>
           <p className="text-muted-foreground text-sm mt-1">Debugging cryptographic token lifetime bounds</p>
         </div>
-        <Button variant="outline" onClick={() => { checkStatus(); fetchPortfolio(); }} disabled={isLoadingStatus || isLoadingPortfolio}>
+        <Button variant="outline" onClick={() => { checkStatus(); if(status?.hasAccessToken) fetchPortfolio(); }} disabled={isLoadingStatus || isLoadingPortfolio}>
           <RefreshCw className="mr-2 h-4 w-4" /> Refresh
         </Button>
       </div>
 
-      {/* Synchronized Timeline Diagnostic Blocks */}
+      {/* Clock Realtime Synchronization */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card><CardContent className="pt-4 flex items-center gap-3"><Laptop className="h-5 w-5 text-blue-500" /><div><p className="text-xs text-muted-foreground font-medium">Browser Clock</p><p className="text-sm font-semibold tabular-nums">{clientTime}</p></div></CardContent></Card>
         <Card><CardContent className="pt-4 flex items-center gap-3"><Server className="h-5 w-5 text-purple-500" /><div><p className="text-xs text-muted-foreground font-medium">App Server Time</p><p className="text-sm font-semibold tabular-nums">{status?.serverTimestamp ? new Date(status.serverTimestamp).toLocaleString() : 'Loading...'}</p></div></CardContent></Card>
         <Card><CardContent className="pt-4 flex items-center gap-3"><Clock className="h-5 w-5 text-emerald-600" /><div><p className="text-xs text-muted-foreground font-medium">Paytm Response Time</p><p className="text-sm font-bold text-emerald-900 tabular-nums">{portfolio?.paytmApiTimestamp ? new Date(portfolio.paytmApiTimestamp).toLocaleString() : 'No Connection'}</p></div></CardContent></Card>
       </div>
 
-      {/* JWT Structural Claim Breakdown */}
+      {/* Cryptographic token inspector */}
       <Card className="border-purple-200 bg-purple-50/10">
         <CardHeader className="pb-2">
           <CardTitle className="flex items-center gap-2 text-base text-purple-900"><Fingerprint className="h-4 w-4" />JWT Claims Inspector</CardTitle>
@@ -190,28 +204,82 @@ function PaytmPortfolioContent() {
         </CardContent>
       </Card>
 
-      {/* Status Indicators */}
+      {/* System Status Matrix Indicators */}
       <Card>
         <CardContent className="pt-6">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatusIndicator ok={status?.apiKeyConfigured} label="API Key" subtext={status?.apiKeyConfigured ? 'Secured' : 'Missing'} />
             <StatusIndicator ok={status?.secretConfigured} label="API Secret" subtext={status?.secretConfigured ? 'Secured' : 'Missing'} />
-            <StatusIndicator ok={status?.hasAccessToken && !portfolioError} label="Session State" subtext={status?.hasAccessToken && !portfolioError ? 'Active Token' : 'OAuth Required'} />
+            <StatusIndicator ok={status?.hasAccessToken && !isTokenError} label="Session State" subtext={status?.hasAccessToken && !isTokenError ? 'Active Token' : 'OAuth Required'} />
             <StatusIndicator ok={!!portfolio} label="Data Pipeline" subtext={portfolio ? 'Synced' : 'Dormant'} />
           </div>
         </CardContent>
       </Card>
 
-      {/* Handle Errors */}
-      {portfolioError && (
-        <Card className="border-destructive/50 bg-destructive/5"><CardContent className="pt-4 flex gap-3"><AlertCircle className="h-5 w-5 text-destructive mt-0.5" /><div><p className="text-sm font-semibold text-destructive">Upstream Lifetime Fault Detected</p><p className="text-xs font-mono text-slate-600 mt-1">{portfolioError}</p><Button variant="destructive" size="sm" className="mt-3" onClick={() => { try { const res = fetch('/api/paytm-portfolio?action=login_url'); res.then(r => r.json()).then(d => { if(d.login_url) window.open(d.login_url, '_self'); }); } catch {} }}>Re-authenticate Session</Button></div></CardContent></Card>
+      {/* Missing configuration banner layout */}
+      {status && (!status.apiKeyConfigured || !status.secretConfigured) && !isLoadingStatus && (
+        <Card className="border-destructive/50">
+          <CardHeader><CardTitle className="flex items-center gap-2 text-destructive"><AlertCircle className="h-5 w-5" />Setup Required</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm text-muted-foreground">Set the following environment variables:</p>
+            <div className="bg-muted rounded-lg p-3 font-mono text-xs space-y-1">
+              <p>PAYTM_MONEY_API_KEY=<span className="text-muted-foreground">your_api_key</span></p>
+              <p>PAYTM_MONEY_SECRET=<span className="text-muted-foreground">your_api_secret</span></p>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
-      {/* Main Table Content */}
+      {/* RESTORED: Native authentication prompt layout */}
+      {needsAuth && !isLoadingStatus && (
+        <Card className="border-yellow-400/50">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Key className="h-5 w-5 text-yellow-500" />OAuth Handshake Required</CardTitle>
+            <CardDescription>Connect your verified credentials to start streaming historical holdings metrics.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button onClick={startOAuthFlow} className="w-full" size="lg"><ExternalLink className="mr-2 h-4 w-4" />Authorize Paytm Money Session</Button>
+            <div className="mt-3 text-xxs text-muted-foreground bg-muted p-2 rounded font-mono break-all">
+              Callback URI: {typeof window !== 'undefined' ? window.location.origin : ''}/paytm-portfolio
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Handle Lifetime Errors */}
+      {portfolioError && (
+        <Card className="border-destructive/50 bg-destructive/5">
+          <CardContent className="pt-4 flex gap-3">
+            <AlertCircle className="h-5 w-5 text-destructive mt-0.5" />
+            <div className="w-full">
+              <p className="text-sm font-semibold text-destructive">Upstream Lifetime Fault Detected</p>
+              <p className="text-xs font-mono text-slate-600 mt-1 break-all">{portfolioError}</p>
+              <div className="flex gap-2 mt-3">
+                <Button variant="destructive" size="sm" onClick={startOAuthFlow}><RefreshCcw className="mr-2 h-3.5 w-3.5" />Re-authenticate Session</Button>
+                <Button variant="outline" size="sm" onClick={fetchPortfolio}><RefreshCw className="mr-2 h-3.5 w-3.5" />Retry Fetch</Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Holdings Display Grid Layout */}
       {portfolio && (
         <Card>
           <CardContent className="pt-6">
-            <ScrollArea className="h-[300px]">
+            <div className="flex gap-2 mb-4">
+              {portfolio.source && <Badge variant="outline">{portfolio.source}</Badge>}
+              {portfolio.agentModel && <Badge variant="secondary">{portfolio.agentModel}</Badge>}
+            </div>
+            
+            {portfolio.insights && (
+              <div className="p-3 bg-amber-50/50 border border-amber-200/60 rounded-lg mb-4 text-sm text-amber-900">
+                <div className="flex items-center gap-1.5 font-semibold text-xs mb-1 text-amber-800"><Lightbulb className="h-3.5 w-3.5" /> AI Observations</div>
+                <p>{portfolio.insights}</p>
+              </div>
+            )}
+
+            <ScrollArea className="h-[350px]">
               <Table>
                 <TableHeader><TableRow><TableHead>Symbol</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">LTP</TableHead><TableHead className="text-right">P&L</TableHead></TableRow></TableHeader>
                 <TableBody>
@@ -234,5 +302,5 @@ function PaytmPortfolioContent() {
 }
 
 export default function PaytmPortfolioPage() {
-  return <Suspense fallback={<div className="p-8"><Loader2 className="animate-spin" /></div>}><PaytmPortfolioContent /></Suspense>;
+  return <Suspense fallback={<div className="p-8"><Loader2 className="animate-spin text-primary mx-auto h-8 w-8" /></div>}><PaytmPortfolioContent /></Suspense>;
 }
