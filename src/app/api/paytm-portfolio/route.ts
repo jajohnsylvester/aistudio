@@ -6,7 +6,7 @@ import {
 } from '@/lib/paytm-shared';
 
 const COOKIE_NAME = 'paytm_access_token';
-const CLOCK_TOLERANCE_SECONDS = 60;
+const CLOCK_TOLERANCE_SECONDS = 120;
 
 /**
  * Enhanced API caller fetching holdings data alongside upstream server header dates.
