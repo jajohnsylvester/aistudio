@@ -57,24 +57,21 @@ interface PortfolioData {
   tokenExpired?: boolean;
 }
 
-function StatusIndicator({ ok, label, subtext, warn = false }: {
+function StatusIndicator({ ok, label, subtext }: {
   ok: boolean | undefined;
   label: string;
   subtext: string;
-  warn?: boolean;
 }) {
   return (
     <div className="flex items-center gap-3">
       {ok ? (
         <CheckCircle className="h-5 w-5 text-green-500 flex-shrink-0" />
-      ) : warn ? (
-        <AlertCircle className="h-5 w-5 text-yellow-500 flex-shrink-0" />
       ) : (
         <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />
       )}
       <div>
         <p className="text-sm font-medium leading-none">{label}</p>
-        <p className={`text-xs mt-0.5 ${ok ? 'text-green-600 dark:text-green-400' : warn ? 'text-yellow-600 dark:text-yellow-400' : 'text-destructive'}`}>
+        <p className={`text-xs mt-0.5 ${ok ? 'text-green-600 dark:text-green-400' : 'text-destructive'}`}>
           {subtext}
         </p>
       </div>
@@ -175,7 +172,7 @@ function PaytmPortfolioContent() {
         checkStatus();
       } catch (error: any) {
         toast({ variant: 'destructive', title: 'Exchange Error', description: error.message });
-      } {
+      } finally {
         setIsLoadingPortfolio(false);
       }
     }
@@ -278,7 +275,7 @@ function PaytmPortfolioContent() {
         </Card>
       </div>
 
-      {/* Verification card matrix */}
+      {/* Verification Matrix */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-base">
@@ -306,7 +303,6 @@ function PaytmPortfolioContent() {
                 />
                 <StatusIndicator
                   ok={status?.hasAccessToken && !status?.tokenExpired}
-                  warn={!status?.hasAccessToken || status?.tokenExpired}
                   label="Access Token"
                   subtext={
                     status?.hasAccessToken && !status?.tokenExpired ? 'Active' :
@@ -315,7 +311,6 @@ function PaytmPortfolioContent() {
                 />
                 <StatusIndicator
                   ok={status?.geminiKeyConfigured}
-                  warn={!status?.geminiKeyConfigured}
                   label="Gemini AI"
                   subtext={status?.geminiKeyConfigured ? 'Configured' : 'Optional'}
                 />
@@ -334,7 +329,7 @@ function PaytmPortfolioContent() {
         </CardContent>
       </Card>
 
-      {/* Missing configuration card layout */}
+      {/* Missing configuration details layout */}
       {status && (!status.apiKeyConfigured || !status.secretConfigured) && !isLoadingStatus && (
         <Card className="border-destructive/50">
           <CardHeader>
@@ -353,7 +348,7 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
-      {/* Re-authenticate setup module */}
+      {/* Re-authenticate component layout context module */}
       {needsAuth && !isLoadingStatus && (
         <Card className={`${status?.tokenExpired ? 'border-orange-400/50' : 'border-yellow-400/50'}`}>
           <CardHeader>
@@ -376,7 +371,7 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
-      {/* Internal response code errors handle component */}
+      {/* Error reporting layout framework components */}
       {status?.hasAccessToken && portfolioError && !isLoadingPortfolio && (
         <Card className="border-orange-400/50">
           <CardHeader>
@@ -404,7 +399,7 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
-      {/* Loading state rendering element */}
+      {/* Loading component placeholder rendering blocks */}
       {isLoadingPortfolio && (
         <div className="flex flex-col items-center justify-center py-14 gap-4">
           <div className="relative">
@@ -415,7 +410,7 @@ function PaytmPortfolioContent() {
         </div>
       )}
 
-      {/* Core Portfolio Elements Matrix */}
+      {/* Portfolio Matrix Elements Content */}
       {status?.hasAccessToken && !status?.tokenExpired && portfolio && !portfolioError && (
         <>
           <div className="flex flex-wrap items-center justify-between gap-2 bg-muted/40 border p-3 rounded-xl">
@@ -436,3 +431,129 @@ function PaytmPortfolioContent() {
                 <Clock className="h-3.5 w-3.5" />
                 <span>Paytm API Response Time: <strong>{new Date(portfolio.paytmApiTimestamp).toLocaleString('en-IN')}</strong></span>
               </div>
+            )}
+          </div>
+
+          {/* Metric Dashboard Cards */}
+          <div className="grid gap-4 md:grid-cols-4">
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground">Total Investment</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{formatCurrency(portfolio.totalInvestment)}</div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground">Current Value</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{formatCurrency(portfolio.totalCurrentValue)}</div>
+              </CardContent>
+            </Card>
+
+            <Card className={portfolio.totalPnl >= 0 ? 'border-green-400/50' : 'border-destructive/50'}>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
+                  {portfolio.totalPnl >= 0 ? <TrendingUp className="h-4 w-4 text-green-500" /> : <TrendingDown className="h-4 w-4 text-destructive" />}
+                  Profit / Loss
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className={`text-2xl font-bold ${portfolio.totalPnl >= 0 ? 'text-green-600' : 'text-destructive'}`}>
+                  {formatCurrency(portfolio.totalPnl)}
+                </div>
+                <p className={`text-sm ${portfolio.totalPnl >= 0 ? 'text-green-600' : 'text-destructive'}`}>
+                  {formatPercent(portfolio.totalPnlPercent)}
+                </p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
+                  <Database className="h-4 w-4" />
+                  Holdings
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{portfolio.holdings?.length || 0}</div>
+                <p className="text-sm text-muted-foreground">stocks</p>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* AI Insights Module Layout */}
+          {portfolio.insights && (
+            <Card className="border-amber-200/50 dark:border-amber-800/30">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Lightbulb className="h-5 w-5 text-amber-500" />
+                  AI Portfolio Insights
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="whitespace-pre-wrap text-sm leading-relaxed">{portfolio.insights}</p>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Holdings Data Grid Presenter */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Wallet className="h-5 w-5" />
+                Your Holdings
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <ScrollArea className="h-[450px]">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Symbol</TableHead>
+                      <TableHead>Exchange</TableHead>
+                      <TableHead className="text-right">Qty</TableHead>
+                      <TableHead className="text-right">Avg Price</TableHead>
+                      <TableHead className="text-right">LTP</TableHead>
+                      <TableHead className="text-right">Investment</TableHead>
+                      <TableHead className="text-right">Current Value</TableHead>
+                      <TableHead className="text-right">P&L</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {portfolio.holdings?.map((h, i) => (
+                      <TableRow key={i}>
+                        <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
+                        <TableCell><Badge variant="outline" className="text-xs">{h.exchange}</Badge></TableCell>
+                        <TableCell className="text-right tabular-nums">{h.quantity}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatCurrency(h.average_price)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatCurrency(h.last_price)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatCurrency(h.investment_value)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{formatCurrency(h.current_value)}</TableCell>
+                        <TableCell className={`text-right font-medium tabular-nums ${h.pnl >= 0 ? 'text-green-600' : 'text-destructive'}`}>
+                          <div>{formatCurrency(h.pnl)}</div>
+                          <div className="text-xs opacity-80">{formatPercent(h.pnl_percent)}</div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+            </CardContent>
+          </Card>
+        </>
+      )}
+    </div>
+  );
+}
+
+export default function PaytmPortfolioPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center p-12 min-h-[400px]"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>}>
+      <PaytmPortfolioContent />
+    </Suspense>
+  );
+}
