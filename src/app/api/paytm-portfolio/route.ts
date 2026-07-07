@@ -16,7 +16,6 @@ function decodeJwtTimestamps(token: string) {
     const parts = token.split('.');
     if (parts.length !== 3) return { iatStr: null, expStr: null, rawIat: null, rawExp: null };
 
-    // Decode base64 payload segment safely
     const payloadJson = Buffer.from(parts[1], 'base64').toString('utf-8');
     const payload = JSON.parse(payloadJson);
 
@@ -26,7 +25,7 @@ function decodeJwtTimestamps(token: string) {
       iatStr: payload.iat ? new Date(payload.iat * 1000).toISOString() : null,
       expStr: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
     };
-  } catch (e) {
+  } catch {
     return { iatStr: 'Error parsing JWT', expStr: 'Error parsing JWT', rawIat: null, rawExp: null };
   }
 }
@@ -105,21 +104,26 @@ export async function GET(request: NextRequest) {
         tokenExpired: false, 
         apiKeyConfigured: !!apiKey,
         secretConfigured: !!apiSecret,
+        geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
+        proxyConfigured: !!process.env.WEBSHARE_PROXY_URL,
         serverTimestamp: new Date().toISOString(),
-        jwtMeta, // Exposes token lifecycle values to UI diagnostics loops
+        jwtMeta,
         tools: MCP_TOOLS.map(t => t.name),
       });
     }
 
     if (action === 'login_url') {
-      if (!apiKey) return NextResponse.json({ error: 'API key unconfigured' }, { status: 400 });
+      if (!apiKey) return NextResponse.json({ error: 'PAYTM_MONEY_API_KEY not configured' }, { status: 400 });
       const state = searchParams.get('state') || Date.now().toString();
-      return NextResponse.json({ login_url: `${PAYTM_LOGIN_URL}?apiKey=${apiKey}&state=${state}` });
+      return NextResponse.json({ 
+        login_url: `${PAYTM_LOGIN_URL}?apiKey=${apiKey}&state=${state}` 
+      });
     }
 
     if (action === 'exchange_token') {
       const requestToken = searchParams.get('request_token');
       if (!requestToken) return NextResponse.json({ error: 'Missing request_token' }, { status: 400 });
+      if (!apiKey || !apiSecret) return NextResponse.json({ error: 'API credentials not configured' }, { status: 500 });
 
       const response = await fetch(`https://developer.paytmmoney.com${API_ROUTES.access_token}`, {
         method: 'POST',
@@ -167,7 +171,7 @@ export async function GET(request: NextRequest) {
         insights, agentModel,
         lastUpdated: new Date().toISOString(),
         paytmApiTimestamp: upstreamTime,
-        jwtMeta: decodeJwtTimestamps(cookieToken.value), // Merges cryptographic constraints with the response data
+        jwtMeta: decodeJwtTimestamps(cookieToken.value),
         source: 'Paytm Money MCP Server',
       });
     }
