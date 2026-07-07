@@ -6,15 +6,23 @@ import {
 } from '@/lib/paytm-shared';
 
 const COOKIE_NAME = 'paytm_access_token';
-const CLOCK_TOLERANCE_SECONDS = 30; // OneUptime Clock Skew Buffer window config
+const CLOCK_TOLERANCE_SECONDS = 30;
 
-async function fetchHoldings(accessToken: string) {
+/**
+ * Enhanced API caller fetching holdings data alongside upstream server header dates.
+ */
+async function fetchHoldingsWithTime(accessToken: string): Promise<{ holdings: any[]; upstreamTime: string }> {
   try {
+    // callPaytmAPI abstractly fetches holdings data.
     const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, accessToken);
+    
+    // Fallback timestamp if the shared abstract fetcher strips raw response headers
+    const fallbackTime = new Date().toISOString();
+
     const rawHoldings = (holdingsRaw as { data?: { holdings?: unknown[] }; holdings?: unknown[] })?.data?.holdings ||
                         (holdingsRaw as { holdings?: unknown[] })?.holdings || [];
 
-    return rawHoldings.map((h: Record<string, unknown>) => ({
+    const mappedHoldings = rawHoldings.map((h: Record<string, unknown>) => ({
       trading_symbol: (h.trading_symbol || h.symbol || h.pml_id || 'Unknown') as string,
       exchange: (h.exchange || 'NSE') as string,
       quantity: parseFloat((h.quantity || h.qty) as string) || 0,
@@ -23,8 +31,13 @@ async function fetchHoldings(accessToken: string) {
       pnl: parseFloat((h.pnl || h.profit_loss) as string) || 0,
       pnl_percent: parseFloat((h.pnl_percent || h.change_percent) as string) || 0,
     }));
+
+    return {
+      holdings: mappedHoldings,
+      upstreamTime: (holdingsRaw as { responseDate?: string })?.responseDate || fallbackTime
+    };
   } catch (error: any) {
-    throw new Error(`Upstream API evaluation exception. Verify x-jwt-token configuration metrics. Msg: ${error.message}`);
+    throw new Error(`Upstream API evaluation exception: ${error.message}`);
   }
 }
 
@@ -55,13 +68,7 @@ ${holdings.slice(0, 20).map(h =>
   `- ${h.trading_symbol} (${h.exchange}): ${h.quantity} shares @ ₹${h.average_price.toFixed(2)} | LTP: ₹${h.last_price.toFixed(2)} | P&L: ₹${h.pnl.toFixed(2)} (${h.pnl_percent.toFixed(2)}%)`
 ).join('\n')}
 
-Provide a concise analysis covering:
-1. Portfolio diversification and sector concentration
-2. Top performers and underperformers
-3. Overall portfolio health and risk assessment
-4. Brief strategic recommendations
-
-Keep the response focused and under 300 words.`;
+Provide a concise analysis covering portfolio diversification, top/underperformers, and risk assessment under 300 words.`;
 
   try {
     const response = await fetch(
@@ -109,8 +116,7 @@ export async function GET(request: NextRequest) {
         secretConfigured: !!apiSecret,
         geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
         proxyConfigured: !!process.env.WEBSHARE_PROXY_URL,
-        serverTimestamp: new Date().toISOString(),
-        clockToleranceConfigured: `${CLOCK_TOLERANCE_SECONDS}s`,
+        serverTimestamp: new Date().toISOString(), // Tracks Hosting Application Container instances time context
         tools: MCP_TOOLS.map(t => t.name),
       });
     }
@@ -148,9 +154,7 @@ export async function GET(request: NextRequest) {
 
       if (!response.ok) {
         const errText = await response.text();
-        return NextResponse.json({ 
-          error: `Token exchange failure. Confirm single-use constraints haven't drifted. Upstream logs: ${errText}` 
-        }, { status: 500 });
+        return NextResponse.json({ error: `Token exchange failure. Upstream details: ${errText}` }, { status: 500 });
       }
 
       const tokenData = await response.json();
@@ -170,10 +174,10 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({
           success: true,
           hasAccessToken: true,
-          message: 'Access token securely persisted via client context cookies.',
+          message: 'Access token securely persisted.',
         });
       }
-      return NextResponse.json({ error: 'Property mapping missed valid token payloads.' }, { status: 500 });
+      return NextResponse.json({ error: 'Missing token in response object structure.' }, { status: 500 });
     }
 
     if (action === 'portfolio' || !action) {
@@ -184,13 +188,8 @@ export async function GET(request: NextRequest) {
         }, { status: 401 });
       }
 
-      const rawHoldings = await fetchHoldings(cookieToken.value);
-      const holdings: Holding[] = rawHoldings.map(h => ({
-        ...h,
-        current_value: h.quantity * h.last_price,
-        investment_value: h.quantity * h.average_price,
-      }));
-
+      const { holdings, upstreamTime } = await fetchHoldingsWithTime(cookieToken.value);
+      
       const totalInvestment = holdings.reduce((s, h) => s + h.investment_value, 0);
       const totalCurrentValue = holdings.reduce((s, h) => s + h.current_value, 0);
       const totalPnl = totalCurrentValue - totalInvestment;
@@ -209,16 +208,15 @@ export async function GET(request: NextRequest) {
         insights,
         agentModel,
         lastUpdated: new Date().toISOString(),
+        paytmApiTimestamp: upstreamTime, // Sent back cleanly to client layout components
         source: 'Paytm Money MCP Server + Gemini AI',
       });
     }
 
-    return NextResponse.json({ error: `Invalid action configuration: ${action}` }, { status: 400 });
+    return NextResponse.json({ error: `Invalid action variant parameter: ${action}` }, { status: 400 });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';
-    const isTokenError = message.includes('expired') ||
-                         message.includes('authenticate') ||
-                         message.includes('token');
+    const isTokenError = message.includes('expired') || message.includes('authenticate') || message.includes('token');
                          
     if (isTokenError) {
       cookieStore.delete(COOKIE_NAME);
