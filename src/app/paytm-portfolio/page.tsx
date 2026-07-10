@@ -112,6 +112,12 @@ function PaytmPortfolioContent() {
       if (data.error) {
         setPortfolioError(data.error);
         setPortfolio(null);
+
+        // If the token is expired/rejected upstream, clear the stale cookie and update status
+        if (data.tokenExpired || data.oauthRequired) {
+          await fetch('/api/paytm-portfolio?action=clear_token', { credentials: 'include' });
+          setStatus(prev => prev ? { ...prev, hasAccessToken: false, tokenExpired: true } : prev);
+        }
       } else {
         setPortfolio(data);
       }
@@ -152,8 +158,30 @@ function PaytmPortfolioContent() {
     handleExchangeToken();
   }, [requestToken, router, checkStatus, toast]);
 
-  useEffect(() => { if (!requestToken) checkStatus(); }, [checkStatus, requestToken]);
-  useEffect(() => { if (status?.hasAccessToken && !requestToken && !status?.tokenExpired) fetchPortfolio(); }, [status?.hasAccessToken, status?.tokenExpired, fetchPortfolio, requestToken]);
+  // On launch: if no requestToken, check status. If token is expired, clear it so we start fresh.
+  useEffect(() => {
+    if (requestToken) return;
+    checkStatus().then(() => {
+      // status is set synchronously inside checkStatus via setState, but we need the latest value
+    });
+  }, [checkStatus, requestToken]);
+
+  // When status loads and token is expired, clear the cookie cache so next visit is clean
+  useEffect(() => {
+    if (status && status.hasAccessToken && status.tokenExpired && !requestToken) {
+      fetch('/api/paytm-portfolio?action=clear_token', { credentials: 'include' }).then(() => {
+        // Update local status to reflect cleared token
+        setStatus(prev => prev ? { ...prev, hasAccessToken: false, tokenExpired: false } : prev);
+      });
+    }
+  }, [status, requestToken]);
+
+  // Auto-fetch portfolio when token is valid (not expired) — display portfolio directly without asking for re-auth
+  useEffect(() => {
+    if (status?.hasAccessToken && !status?.tokenExpired && !requestToken) {
+      fetchPortfolio();
+    }
+  }, [status?.hasAccessToken, status?.tokenExpired, fetchPortfolio, requestToken]);
 
   const activeJwtMeta = portfolio?.jwtMeta || status?.jwtMeta;
   const isTokenError = portfolioError?.includes('expired') || portfolioError?.includes('token') || portfolioError?.includes('401');

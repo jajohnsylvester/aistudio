@@ -36,20 +36,46 @@ export const MCP_TOOLS = [
   { name: 'get_orders', description: 'Get order book' },
 ];
 
+/**
+ * Structured logger for debugging Paytm API interactions.
+ */
+export function logDebug(level: 'INFO' | 'DEBUG' | 'WARN' | 'ERROR', message: string, data?: Record<string, unknown>) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level,
+    message,
+    ...(data ? { data } : {}),
+  };
+  console.log(JSON.stringify(entry));
+}
+
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
     const parts = token.split('.');
     if (parts.length !== 3) return null;
     const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
     return JSON.parse(Buffer.from(b64, 'base64').toString());
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 function isTokenExpired(token: string): boolean {
   const payload = decodeJwtPayload(token);
-  if (!payload?.exp) return true;
-  // Consider token expired 5 minutes before actual expiry
-  return Date.now() >= ((payload.exp as number) * 1000 - 5 * 60 * 1000);
+  if (!payload?.exp) {
+    logDebug('WARN', 'Token has no exp claim or is unparseable; treating as expired');
+    return true;
+  }
+  const expiryMs = (payload.exp as number) * 1000;
+  const bufferMs = 5 * 60 * 1000; // 5 minute buffer
+  const now = Date.now();
+  const expired = now >= (expiryMs - bufferMs);
+  logDebug('DEBUG', 'Token expiry check', {
+    now: new Date(now).toISOString(),
+    expiresAt: new Date(expiryMs).toISOString(),
+    expired,
+  });
+  return expired;
 }
 
 function getTokenExpiryTime(token: string): Date | null {
@@ -59,13 +85,17 @@ function getTokenExpiryTime(token: string): Date | null {
 
 export async function getAccessTokenFromMemory() {
   if (!tokenStore.access_token) {
+    logDebug('DEBUG', 'No access token found in memory store');
     return { accessToken: null, isExpired: true, expiresAt: null };
   }
 
+  const isExpired = isTokenExpired(tokenStore.access_token);
+  const expiresAt = getTokenExpiryTime(tokenStore.access_token);
+
   return {
     accessToken: tokenStore.access_token,
-    isExpired: isTokenExpired(tokenStore.access_token),
-    expiresAt: getTokenExpiryTime(tokenStore.access_token),
+    isExpired,
+    expiresAt,
   };
 }
 
@@ -74,38 +104,69 @@ export async function saveAccessTokenToMemory(tokenData: {
   public_access_token?: string;
   read_access_token?: string;
 }) {
+  logDebug('INFO', 'Saving access token to memory store', {
+    hasPublicToken: !!tokenData.public_access_token,
+    hasReadToken: !!tokenData.read_access_token,
+  });
   tokenStore = {
     access_token: tokenData.access_token,
     public_access_token: tokenData.public_access_token || null,
     read_access_token: tokenData.read_access_token || null,
     created_at: new Date(),
   };
+  const expiresAt = getTokenExpiryTime(tokenData.access_token);
+  logDebug('INFO', 'Access token saved', { expiresAt: expiresAt?.toISOString() });
+}
+
+export async function clearAccessTokenFromMemory() {
+  logDebug('INFO', 'Clearing access token from memory store');
+  tokenStore = {
+    access_token: null,
+    public_access_token: null,
+    read_access_token: null,
+    created_at: null,
+  };
 }
 
 export async function callPaytmAPI(endpoint: string, accessToken: string): Promise<unknown> {
-  const proxyUrl = process.env.WEBSHARE_PROXY_URL;
+  logDebug('INFO', 'Calling Paytm API', { endpoint });
 
   const headers: Record<string, string> = {
-    'Authorization': `Bearer ${accessToken}`,
+    'x-jwt-token': accessToken,
     'Content-Type': 'application/json',
+    'openapi-client-src': 'sdk',
   };
 
   const response = await fetch(`${PAYTM_API_HOST}${endpoint}`, {
     headers,
   });
 
+  logDebug('DEBUG', 'Paytm API response received', {
+    endpoint,
+    status: response.status,
+    statusText: response.statusText,
+  });
+
   if (!response.ok) {
+    const errorBody = await response.text();
     if (response.status === 400 || response.status === 401) {
+      logDebug('ERROR', 'Paytm API returned auth error', {
+        status: response.status,
+        endpoint,
+        errorBody,
+      });
       throw new Error('Access token expired. Please re-authenticate.');
     }
     if (response.status === 403) {
+      logDebug('ERROR', 'Paytm API returned access denied', { endpoint, errorBody });
       throw new Error('Access denied. Check API permissions.');
     }
     if (response.status === 429) {
+      logDebug('WARN', 'Paytm API rate limit exceeded', { endpoint });
       throw new Error('Rate limit exceeded. Try again later.');
     }
-    const errorText = await response.text();
-    throw new Error(`Paytm API error ${response.status}: ${errorText}`);
+    logDebug('ERROR', 'Paytm API error', { status: response.status, endpoint, errorBody });
+    throw new Error(`Paytm API error ${response.status}: ${errorBody}`);
   }
 
   return response.json();

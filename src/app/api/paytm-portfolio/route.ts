@@ -2,14 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import {
   PAYTM_LOGIN_URL, API_ROUTES, MCP_TOOLS,
-  callPaytmAPI, type Holding,
+  callPaytmAPI, logDebug, type Holding,
 } from '@/lib/paytm-shared';
 
 const COOKIE_NAME = 'paytm_access_token';
 const CLOCK_TOLERANCE_SECONDS = 120;
 
 /**
- * Helper to extract and decode JWT claims (iat and exp) without external packages.
+ * Decode JWT claims (iat and exp) without external packages.
  */
 function decodeJwtTimestamps(token: string) {
   try {
@@ -26,32 +26,60 @@ function decodeJwtTimestamps(token: string) {
       expStr: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
     };
   } catch {
-    return { iatStr: 'Error parsing JWT', expStr: 'Error parsing JWT', rawIat: null, rawExp: null };
+    return { iatStr: null, expStr: null, rawIat: null, rawExp: null };
   }
 }
 
-async function fetchHoldingsWithTime(accessToken: string): Promise<{ holdings: any[]; upstreamTime: string }> {
+/**
+ * Check if a JWT token is expired based on its exp claim.
+ * Considers a 5-minute buffer to avoid edge-case failures.
+ */
+function isJwtExpired(token: string): boolean {
+  const meta = decodeJwtTimestamps(token);
+  if (!meta.rawExp) return true;
+  const expiryMs = meta.rawExp * 1000;
+  const bufferMs = 5 * 60 * 1000;
+  return Date.now() >= (expiryMs - bufferMs);
+}
+
+async function fetchHoldingsWithTime(accessToken: string): Promise<{ holdings: Holding[]; upstreamTime: string }> {
   try {
     const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, accessToken);
     const fallbackTime = new Date().toISOString();
     const rawHoldings = (holdingsRaw as { data?: { holdings?: unknown[] }; holdings?: unknown[] })?.data?.holdings ||
                         (holdingsRaw as { holdings?: unknown[] })?.holdings || [];
 
-    const mappedHoldings = rawHoldings.map((h: Record<string, unknown>) => ({
-      trading_symbol: (h.trading_symbol || h.symbol || h.pml_id || 'Unknown') as string,
-      exchange: (h.exchange || 'NSE') as string,
-      quantity: parseFloat((h.quantity || h.qty) as string) || 0,
-      average_price: parseFloat((h.average_price || h.avg_price) as string) || 0,
-      last_price: parseFloat((h.last_price || h.ltp) as string) || 0,
-      pnl: parseFloat((h.pnl || h.profit_loss) as string) || 0,
-      pnl_percent: parseFloat((h.pnl_percent || h.change_percent) as string) || 0,
-    }));
+    logDebug('DEBUG', 'Raw holdings payload', { count: rawHoldings.length });
+
+    const mappedHoldings: Holding[] = rawHoldings.map((raw) => {
+      const h = (raw || {}) as Record<string, unknown>;
+      const quantity = parseFloat((h.quantity || h.qty) as string) || 0;
+      const averagePrice = parseFloat((h.average_price || h.avg_price) as string) || 0;
+      const lastPrice = parseFloat((h.last_price || h.ltp) as string) || 0;
+      const pnl = parseFloat((h.pnl || h.profit_loss) as string) || 0;
+      const pnlPercent = parseFloat((h.pnl_percent || h.change_percent) as string) || 0;
+      const investmentValue = quantity * averagePrice;
+      const currentValue = quantity * lastPrice;
+
+      return {
+        trading_symbol: (h.trading_symbol || h.symbol || h.pml_id || 'Unknown') as string,
+        exchange: (h.exchange || 'NSE') as string,
+        quantity,
+        average_price: averagePrice,
+        last_price: lastPrice,
+        pnl,
+        pnl_percent: pnlPercent,
+        current_value: currentValue,
+        investment_value: investmentValue,
+      };
+    });
 
     return {
       holdings: mappedHoldings,
       upstreamTime: (holdingsRaw as { responseDate?: string })?.responseDate || fallbackTime
     };
   } catch (error: any) {
+    logDebug('ERROR', 'fetchHoldingsWithTime failed', { error: error.message });
     throw new Error(`Upstream API evaluation exception: ${error.message}`);
   }
 }
@@ -91,17 +119,29 @@ export async function GET(request: NextRequest) {
   const action = searchParams.get('action');
   const apiKey = process.env.PAYTM_MONEY_API_KEY;
   const apiSecret = process.env.PAYTM_MONEY_SECRET;
-  
+
   const cookieStore = await cookies();
   const cookieToken = cookieStore.get(COOKIE_NAME);
 
+  logDebug('INFO', 'Paytm portfolio API request', { action, hasCookieToken: !!cookieToken?.value });
+
   try {
+    // --- STATUS ---
     if (action === 'status') {
-      const jwtMeta = cookieToken?.value ? decodeJwtTimestamps(cookieToken.value) : null;
+      const tokenValue = cookieToken?.value;
+      const tokenExpired = tokenValue ? isJwtExpired(tokenValue) : true;
+      const jwtMeta = tokenValue ? decodeJwtTimestamps(tokenValue) : null;
+
+      logDebug('DEBUG', 'Status check', {
+        hasToken: !!tokenValue,
+        tokenExpired,
+        exp: jwtMeta?.expStr,
+      });
+
       return NextResponse.json({
         connected: !!(apiKey && apiSecret),
-        hasAccessToken: !!cookieToken?.value,
-        tokenExpired: false, 
+        hasAccessToken: !!tokenValue,
+        tokenExpired,
         apiKeyConfigured: !!apiKey,
         secretConfigured: !!apiSecret,
         geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
@@ -112,33 +152,50 @@ export async function GET(request: NextRequest) {
       });
     }
 
+    // --- CLEAR TOKEN (clear cache on launch) ---
+    if (action === 'clear_token') {
+      logDebug('INFO', 'Clearing access token cookie');
+      cookieStore.delete(COOKIE_NAME);
+      return NextResponse.json({ success: true, message: 'Token cleared.' });
+    }
+
+    // --- LOGIN URL ---
     if (action === 'login_url') {
       if (!apiKey) return NextResponse.json({ error: 'PAYTM_MONEY_API_KEY not configured' }, { status: 400 });
       const state = searchParams.get('state') || Date.now().toString();
-      return NextResponse.json({ 
-        login_url: `${PAYTM_LOGIN_URL}?apiKey=${apiKey}&state=${state}` 
+      return NextResponse.json({
+        login_url: `${PAYTM_LOGIN_URL}?apiKey=${apiKey}&state=${state}`
       });
     }
 
+    // --- EXCHANGE TOKEN ---
     if (action === 'exchange_token') {
       const requestToken = searchParams.get('request_token');
       if (!requestToken) return NextResponse.json({ error: 'Missing request_token' }, { status: 400 });
       if (!apiKey || !apiSecret) return NextResponse.json({ error: 'API credentials not configured' }, { status: 500 });
 
+      logDebug('INFO', 'Exchanging request token for access token');
+
       const response = await fetch(`https://developer.paytmmoney.com${API_ROUTES.access_token}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'openapi-client-src': 'sdk',
+        },
         body: JSON.stringify({ api_key: apiKey, api_secret_key: apiSecret, request_token: requestToken }),
       });
 
       if (!response.ok) {
-        return NextResponse.json({ error: `Handshake rejected: ${await response.text()}` }, { status: 500 });
+        const errorText = await response.text();
+        logDebug('ERROR', 'Token exchange rejected', { status: response.status, errorText });
+        return NextResponse.json({ error: `Handshake rejected: ${errorText}` }, { status: 500 });
       }
 
       const tokenData = await response.json();
       const accessToken = (tokenData as any).access_token;
-      
+
       if (accessToken) {
+        logDebug('INFO', 'Access token obtained, setting cookie');
         cookieStore.set(COOKIE_NAME, accessToken, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
@@ -151,11 +208,25 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'No token returned' }, { status: 500 });
     }
 
+    // --- PORTFOLIO ---
     if (action === 'portfolio' || !action) {
       if (!cookieToken || !cookieToken.value) {
+        logDebug('WARN', 'Portfolio requested but no access token cookie found');
         return NextResponse.json({ error: 'No access token found.', oauthRequired: true }, { status: 401 });
       }
 
+      // Check expiry before making the API call to avoid unnecessary upstream failures
+      if (isJwtExpired(cookieToken.value)) {
+        logDebug('WARN', 'Access token is expired; clearing cookie and requesting re-auth');
+        cookieStore.delete(COOKIE_NAME);
+        return NextResponse.json({
+          error: 'Access token expired. Please re-authenticate.',
+          tokenExpired: true,
+          oauthRequired: true,
+        }, { status: 401 });
+      }
+
+      logDebug('INFO', 'Fetching holdings with valid token');
       const { holdings, upstreamTime } = await fetchHoldingsWithTime(cookieToken.value);
       const totalInvestment = holdings.reduce((s, h) => s + h.investment_value, 0);
       const totalCurrentValue = holdings.reduce((s, h) => s + h.current_value, 0);
@@ -165,6 +236,12 @@ export async function GET(request: NextRequest) {
       const { insights, agentModel } = await generateInsightsWithGemini(
         holdings, totalInvestment, totalCurrentValue, totalPnl, totalPnlPercent
       );
+
+      logDebug('INFO', 'Portfolio fetched successfully', {
+        holdingsCount: holdings.length,
+        totalInvestment,
+        totalCurrentValue,
+      });
 
       return NextResponse.json({
         holdings, totalInvestment, totalCurrentValue, totalPnl, totalPnlPercent,
@@ -178,6 +255,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ error: 'Invalid operation' }, { status: 400 });
   } catch (e: any) {
+    logDebug('ERROR', 'Unhandled error in paytm-portfolio route', { error: e.message, stack: e.stack });
     const isTokenError = e.message.includes('expired') || e.message.includes('token') || e.message.includes('401');
     if (isTokenError) cookieStore.delete(COOKIE_NAME);
     return NextResponse.json({ error: e.message, tokenExpired: isTokenError, oauthRequired: isTokenError }, { status: isTokenError ? 401 : 500 });

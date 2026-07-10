@@ -1,466 +1,334 @@
+'use client';
 
-"use client";
-
-import { useState, useMemo, useEffect, useCallback } from 'react';
-import { AddExpenseDialog } from '@/components/add-expense-dialog';
-import { DashboardSummary } from '@/components/dashboard-summary';
-import { ExpenseList } from '@/components/expense-list';
-import { Button } from '@/components/ui/button';
+import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-  ChartConfig,
-  ChartLegend,
-  ChartLegendContent,
-} from '@/components/ui/chart';
-import { Progress } from '@/components/ui/progress';
-import { Pie, PieChart, Cell } from 'recharts';
-import { TooltipProps } from 'recharts';
-import { NameType, ValueType } from 'recharts/types/component/DefaultTooltipContent';
-import { useToast } from '@/hooks/use-toast';
-import { getExpenses, addExpense, updateExpense, deleteExpense, getBudgets } from '@/lib/sheets';
-import type { Expense, Budget } from '@/lib/types';
-import { Loader2, Download, TrendingUp, TrendingDown } from 'lucide-react';
-import { getMonth, getYear, format, getDate } from 'date-fns';
-import { toZonedTime } from 'date-fns-tz';
-import { EditExpenseDialog } from '@/components/edit-expense-dialog';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import {
+  Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown,
+  AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
+  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint
+} from 'lucide-react';
+import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
-const TIME_ZONE = 'Asia/Kolkata';
-
-const months = [
-  "January", "February", "March", "April", "May", "June", 
-  "July", "August", "September", "October", "November", "December"
-];
-
-const monthColors = [
-  'hsl(var(--chart-1))', 'hsl(var(--chart-2))', 'hsl(var(--chart-3))', 'hsl(var(--chart-4))',
-  'hsl(var(--chart-5))', 'hsl(var(--chart-1))', 'hsl(var(--chart-2))', 'hsl(var(--chart-3))',
-  'hsl(var(--chart-4))', 'hsl(var(--chart-5))', 'hsl(var(--chart-1))', 'hsl(var(--chart-2))'
-];
-
-const years = Array.from({ length: 2050 - 2024 + 1 }, (_, i) => 2024 + i);
-
-const CustomPieTooltip = (props: TooltipProps<ValueType, NameType>) => {
-    const { active, payload } = props;
-    if (active && payload && payload.length) {
-      const data = payload[0];
-      return (
-        <div className="rounded-lg border bg-background p-2 shadow-sm">
-          <div className="grid grid-cols-1 gap-2">
-             <span className="font-bold" style={{ color: data.payload.fill }}>
-                  {data.name}: {Number(data.value).toLocaleString('en-IN', { style: 'currency', currency: 'INR' })}
-             </span>
-          </div>
-        </div>
-      );
-    }
-    return null;
+interface JwtMetadata {
+  rawIat: number | null;
+  rawExp: number | null;
+  iatStr: string | null;
+  expStr: string | null;
 }
 
-export default function DashboardPage() {
-  const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [budgets, setBudgets] = useState<Budget[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+interface MCPStatus {
+  connected: boolean;
+  hasAccessToken: boolean;
+  tokenExpired?: boolean;
+  apiKeyConfigured: boolean;
+  secretConfigured: boolean;
+  geminiKeyConfigured?: boolean;
+  proxyConfigured?: boolean;
+  serverTimestamp?: string;
+  jwtMeta?: JwtMetadata | null;
+  tools?: string[];
+}
+
+interface Holding {
+  trading_symbol: string;
+  exchange: string;
+  quantity: number;
+  average_price: number;
+  last_price: number;
+  pnl: number;
+  pnl_percent: number;
+  current_value: number;
+  investment_value: number;
+}
+
+interface PortfolioData {
+  totalInvestment: number;
+  totalCurrentValue: number;
+  totalPnl: number;
+  totalPnlPercent: number;
+  holdings: Holding[];
+  insights: string;
+  agentModel?: string;
+  source?: string;
+  lastUpdated: string;
+  paytmApiTimestamp?: string;
+  jwtMeta?: JwtMetadata | null;
+}
+
+function StatusIndicator({ ok, label, subtext }: { ok: boolean | undefined; label: string; subtext: string }) {
+  return (
+    <div className="flex items-center gap-3">
+      {ok ? <CheckCircle className="h-5 w-5 text-green-500 flex-shrink-0" /> : <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />}
+      <div>
+        <p className="text-sm font-medium leading-none">{label}</p>
+        <p className={`text-xs mt-0.5 ${ok ? 'text-green-600' : 'text-destructive'}`}>{subtext}</p>
+      </div>
+    </div>
+  );
+}
+
+function PaytmPortfolioContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const requestToken = searchParams.get('request_token');
+
+  const [status, setStatus] = useState<MCPStatus | null>(null);
+  const [portfolio, setPortfolio] = useState<PortfolioData | null>(null);
+  const [portfolioError, setPortfolioError] = useState<string | null>(null);
+  const [isLoadingStatus, setIsLoadingStatus] = useState(true);
+  const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(false);
+  const [clientTime, setClientTime] = useState<string>('');
   const { toast } = useToast();
-  const [selectedMonth, setSelectedMonth] = useState(months[new Date().getMonth()]);
-  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
-  const [editingExpense, setEditingExpense] = useState<Expense | null>(null);
-  const [deletingExpense, setDeletingExpense] = useState<Expense | null>(null);
-  
-  const loadData = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const [sheetExpenses, sheetBudgets] = await Promise.all([getExpenses(selectedYear), getBudgets()]);
-      setExpenses(sheetExpenses);
-      setBudgets(sheetBudgets);
-    } catch (error) {
-      console.error("Failed to load data", error);
-      toast({
-          variant: "destructive",
-          title: "Failed to load data",
-          description: "Could not fetch data from Google Sheets.",
-      })
-    } finally {
-      setIsLoading(false);
-    }
-  }, [toast, selectedYear]);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    setClientTime(new Date().toLocaleString());
+    const timer = setInterval(() => setClientTime(new Date().toLocaleString()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
-
-  const filteredExpenses = useMemo(() => {
-    const monthIndex = months.indexOf(selectedMonth);
-    return expenses.filter(expense => {
-      const expenseDate = toZonedTime(new Date(expense.date), TIME_ZONE);
-      return getMonth(expenseDate) === monthIndex && getYear(expenseDate) === selectedYear;
-    });
-  }, [expenses, selectedMonth, selectedYear]);
-
-  const handleAddExpense = async (newExpenseData: Omit<Expense, 'id'>) => {
+  const checkStatus = useCallback(async () => {
+    setIsLoadingStatus(true);
     try {
-      await addExpense(newExpenseData);
-      await loadData();
-      toast({
-        title: 'Expense Added',
-        description: `"${newExpenseData.description}" was added.`,
-      });
-    } catch (error) {
-        console.error("Failed to add expense", error);
-        toast({
-            variant: 'destructive',
-            title: 'Error',
-            description: 'Failed to add expense to Google Sheet.',
-        })
-    }
-  };
-
-  const handleUpdateExpense = async (updatedExpense: Expense) => {
-    try {
-        await updateExpense(updatedExpense);
-        await loadData();
-        setEditingExpense(null);
-        toast({
-            title: 'Expense Updated',
-            description: `"${updatedExpense.description}" was updated.`,
-        });
-    } catch (error) {
-        console.error("Failed to update expense", error);
-        toast({
-            variant: 'destructive',
-            title: 'Error',
-            description: 'Failed to update expense in Google Sheet.',
-        })
-    }
-  };
-
-  const handleDeleteExpense = async () => {
-    if (!deletingExpense) return;
-    try {
-        await deleteExpense(deletingExpense);
-        await loadData();
-        toast({
-            title: "Expense Deleted",
-            description: `"${deletingExpense.description}" was deleted.`,
-        });
-    } catch(error) {
-        console.error("Failed to delete expense", error);
-        toast({
-            variant: 'destructive',
-            title: 'Error',
-            description: 'Failed to delete expense from Google Sheet.',
-        })
+      const response = await fetch('/api/paytm-portfolio?action=status', { credentials: 'include' });
+      setStatus(await response.json());
+    } catch {
+      toast({ variant: 'destructive', title: 'Status check failed.' });
     } finally {
-        setDeletingExpense(null);
+      setIsLoadingStatus(false);
     }
-  };
-  
-  const handleExport = () => {
-    if (filteredExpenses.length === 0) {
-      toast({
-        variant: "destructive",
-        title: "No data to export",
-        description: "There are no expenses for the selected period.",
-      });
-      return;
-    }
+  }, [toast]);
 
-    const headers = ["ID", "Date", "Description", "Category", "Amount", "Paid"];
-    const csvContent = [
-      headers.join(","),
-      ...filteredExpenses.map(e => 
-        [
-          e.id, 
-          format(toZonedTime(new Date(e.date), TIME_ZONE), "yyyy-MM-dd"), 
-          `"${e.description.replace(/"/g, '""')}"`,
-          e.category, 
-          e.amount,
-          e.category === 'Credit Card' ? (e.paid ? 'Paid' : 'Not Paid') : ''
-        ].join(",")
-      )
-    ].join("\n");
+  const fetchPortfolio = useCallback(async () => {
+    setIsLoadingPortfolio(true);
+    setPortfolioError(null);
+    try {
+      const response = await fetch('/api/paytm-portfolio?action=portfolio', { credentials: 'include' });
+      const data = await response.json();
+      if (data.error) {
+        setPortfolioError(data.error);
+        setPortfolio(null);
 
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    const url = URL.createObjectURL(blob);
-    link.setAttribute("href", url);
-    link.setAttribute("download", `expenses-${selectedYear}-${selectedMonth}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    
-    toast({
-        title: "Export Successful",
-        description: "Your expenses have been downloaded as a CSV file.",
-    });
-  };
-
-  const spendingByCategory = useMemo(() => {
-    return filteredExpenses.reduce((acc, expense) => {
-      const category = expense.category || "Other";
-      if (!acc[category]) {
-        acc[category] = 0;
-      }
-      acc[category] += expense.amount;
-      return acc;
-    }, {} as { [key: string]: number });
-  }, [filteredExpenses]);
-  
-  const pieChartData = useMemo(() => {
-    return Object.entries(spendingByCategory)
-      .map(([name, value]) => ({ name, value }))
-      .filter(item => item.value > 0)
-      .sort((a, b) => b.value - a.value);
-  }, [spendingByCategory]);
-
-  const chartConfig: ChartConfig = useMemo(() => {
-    const config: ChartConfig = {};
-    pieChartData.forEach((item, index) => {
-      config[item.name] = {
-        label: item.name,
-        color: `hsl(var(--chart-${(index % 5) + 1}))`,
-      };
-    });
-    return config;
-  }, [pieChartData]);
-  
-  const categoryBudgets = useMemo(() => {
-    const activeBudgets = budgets.filter(b => b.amount > 0);
-    const categorySpending = pieChartData.reduce((acc, item) => {
-        acc[item.name] = item.value;
-        return acc;
-    }, {} as {[key: string]: number});
-
-    return activeBudgets.map(budget => {
-        const spent = categorySpending[budget.category] || 0;
-        const progress = budget.amount > 0 ? (spent / budget.amount) * 100 : 0;
-        return {
-            ...budget,
-            spent,
-            progress: Math.min(progress, 100),
-            isOver: progress > 100
-        };
-    }).sort((a, b) => b.progress - a.progress);
-  }, [budgets, pieChartData]);
-
-  const dailySpendingData = useMemo(() => {
-    const dailyTotals = filteredExpenses
-      .reduce((acc, expense) => {
-        const day = getDate(toZonedTime(new Date(expense.date), TIME_ZONE));
-        if (!acc[day]) {
-          acc[day] = 0;
+        // If the token is expired/rejected upstream, clear the stale cookie and update status
+        if (data.tokenExpired || data.oauthRequired) {
+          await fetch('/api/paytm-portfolio?action=clear_token', { credentials: 'include' });
+          setStatus(prev => prev ? { ...prev, hasAccessToken: false, tokenExpired: true } : prev);
         }
-        acc[day] += expense.amount;
-        return acc;
-      }, {} as { [key: number]: number });
-    
-    return Object.entries(dailyTotals).map(([day, total]) => ({
-      day: parseInt(day),
-      total,
-    })).sort((a, b) => a.day - b.day);
-  }, [filteredExpenses]);
+      } else {
+        setPortfolio(data);
+      }
+    } catch (error: any) {
+      setPortfolioError(error.message);
+    } finally {
+      setIsLoadingPortfolio(false);
+    }
+  }, []);
 
+  const startOAuthFlow = async () => {
+    try {
+      const response = await fetch('/api/paytm-portfolio?action=login_url', { credentials: 'include' });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+      if (data.login_url) window.open(data.login_url, '_self');
+    } catch (error: any) {
+      toast({ variant: 'destructive', title: 'Error', description: error.message || 'Failed to initialize OAuth flow' });
+    }
+  };
 
-  if (isLoading) {
-    return (
-        <div className="flex justify-center items-center h-screen">
-            <Loader2 className="h-16 w-16 animate-spin text-primary" />
-        </div>
-    );
-  }
+  useEffect(() => {
+    async function handleExchangeToken() {
+      if (!requestToken) return;
+      setIsLoadingPortfolio(true);
+      try {
+        const response = await fetch(`/api/paytm-portfolio?action=exchange_token&request_token=${encodeURIComponent(requestToken)}`, { credentials: 'include' });
+        if (!response.ok) throw new Error('Exchange failed');
+        toast({ title: 'Success', description: 'Token mapped successfully.' });
+        router.replace('/paytm-portfolio');
+        checkStatus();
+      } catch (err: any) {
+        toast({ variant: 'destructive', title: 'Exchange Error', description: err.message });
+      } finally {
+        setIsLoadingPortfolio(false);
+      }
+    }
+    handleExchangeToken();
+  }, [requestToken, router, checkStatus, toast]);
+
+  // On launch: if no requestToken, check status. If token is expired, clear it so we start fresh.
+  useEffect(() => {
+    if (requestToken) return;
+    checkStatus().then(() => {
+      // status is set synchronously inside checkStatus via setState, but we need the latest value
+    });
+  }, [checkStatus, requestToken]);
+
+  // When status loads and token is expired, clear the cookie cache so next visit is clean
+  useEffect(() => {
+    if (status && status.hasAccessToken && status.tokenExpired && !requestToken) {
+      fetch('/api/paytm-portfolio?action=clear_token', { credentials: 'include' }).then(() => {
+        // Update local status to reflect cleared token
+        setStatus(prev => prev ? { ...prev, hasAccessToken: false, tokenExpired: false } : prev);
+      });
+    }
+  }, [status, requestToken]);
+
+  // Auto-fetch portfolio when token is valid (not expired) — display portfolio directly without asking for re-auth
+  useEffect(() => {
+    if (status?.hasAccessToken && !status?.tokenExpired && !requestToken) {
+      fetchPortfolio();
+    }
+  }, [status?.hasAccessToken, status?.tokenExpired, fetchPortfolio, requestToken]);
+
+  const activeJwtMeta = portfolio?.jwtMeta || status?.jwtMeta;
+  const isTokenError = portfolioError?.includes('expired') || portfolioError?.includes('token') || portfolioError?.includes('401');
+  const needsAuth = status && status.apiKeyConfigured && status.secretConfigured && (!status.hasAccessToken || status.tokenExpired);
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-center gap-4">
-          <h1 className="text-3xl font-bold tracking-tight font-headline">
-            Dashboard
-          </h1>
-          <Select value={selectedYear.toString()} onValueChange={(value) => setSelectedYear(parseInt(value))}>
-            <SelectTrigger className="w-[120px]">
-              <SelectValue placeholder="Select year" />
-            </SelectTrigger>
-            <SelectContent>
-              {years.map(year => (
-                <SelectItem key={year} value={year.toString()}>{year}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Paytm Money Portfolio Terminal</h1>
+          <p className="text-muted-foreground text-sm mt-1">Debugging cryptographic token lifetime bounds</p>
         </div>
-        <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={handleExport}>
-                <Download className="mr-2 h-4 w-4" />
-                Export to CSV
-            </Button>
-            <AddExpenseDialog onAddExpense={handleAddExpense} />
-        </div>
+        <Button variant="outline" onClick={() => { checkStatus(); if(status?.hasAccessToken) fetchPortfolio(); }} disabled={isLoadingStatus || isLoadingPortfolio}>
+          <RefreshCw className="mr-2 h-4 w-4" /> Refresh
+        </Button>
       </div>
 
-      <Tabs value={selectedMonth} onValueChange={setSelectedMonth} className="w-full">
-        <TabsList className="grid h-auto w-full grid-cols-2 flex-wrap sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-          {months.map((month, index) => (
-            <TabsTrigger 
-              key={month} 
-              value={month}
-              style={selectedMonth === month ? { backgroundColor: monthColors[index], color: '#111' } : {}}
-            >
-              {month}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-        {months.map(month => (
-          <TabsContent key={month} value={month} className="mt-6">
-            <DashboardSummary expenses={filteredExpenses} budgets={budgets} />
-            
-            <div className="grid gap-6 mt-6 md:grid-cols-2 lg:grid-cols-5">
-              <Card className="lg:col-span-3">
-                <CardHeader>
-                    <CardTitle>Budget Progress</CardTitle>
-                    <CardDescription>Your spending vs budgets for {month} {selectedYear}.</CardDescription>
-                </CardHeader>
-                <CardContent>
-                    {categoryBudgets.length > 0 ? (
-                        <div className="space-y-4">
-                            {categoryBudgets.map(budget => (
-                                <div key={budget.category} className="space-y-1">
-                                    <div className="flex justify-between items-center text-sm">
-                                        <span className="font-medium">{budget.category}</span>
-                                        <span className={budget.isOver ? "text-destructive font-semibold" : "text-muted-foreground"}>
-                                            {Number(budget.spent).toLocaleString('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 0 })} / {Number(budget.amount).toLocaleString('en-IN', { style: 'currency', currency: 'INR', minimumFractionDigits: 0 })}
-                                        </span>
-                                    </div>
-                                    <Progress value={budget.progress} className={budget.isOver ? "[&>div]:bg-destructive" : ""} />
-                                </div>
-                            ))}
-                        </div>
-                    ) : (
-                        <div className="flex flex-col items-center justify-center text-center py-12">
-                           <TrendingUp className="h-12 w-12 text-muted-foreground" />
-                           <p className="mt-4 text-muted-foreground">No budgets set for this month.</p>
-                           <p className="text-sm text-muted-foreground">Go to the Categories page to set your budgets.</p>
-                        </div>
-                    )}
-                </CardContent>
-              </Card>
-              <Card className="lg:col-span-2">
-                  <CardHeader>
-                      <CardTitle>Spending by Category</CardTitle>
-                      <CardDescription>A breakdown of your expenses for {month} {selectedYear}.</CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                      {pieChartData.length > 0 ? (
-                      <ChartContainer config={chartConfig} className="mx-auto aspect-square max-h-[350px]">
-                          <PieChart>
-                          <ChartTooltip content={<CustomPieTooltip />} />
-                          <Pie data={pieChartData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={120} >
-                              {pieChartData.map((_, index) => (
-                              <Cell key={`cell-${index}`} fill={chartConfig[pieChartData[index].name]?.color} />
-                              ))}
-                          </Pie>
-                          <ChartLegend content={<ChartLegendContent className="flex flex-wrap justify-center gap-x-4 gap-y-2" />} className="-mt-4" />
-                          </PieChart>
-                      </ChartContainer>
-                      ) : (
-                          <div className="flex h-[350px] items-center justify-center text-muted-foreground">No spending data available.</div>
-                      )}
-                  </CardContent>
-              </Card>
-              
-              <Card className="lg:col-span-3">
-                <CardHeader>
-                  <CardTitle>Daily Spending</CardTitle>
-                  <CardDescription>Daily breakdown for {month} {selectedYear} (Includes Credit Card).</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  {dailySpendingData.length > 0 ? (
-                    <ScrollArea className="h-[250px] w-full">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Day</TableHead>
-                            <TableHead className="text-right">Total Spent</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {dailySpendingData.map(({ day, total }) => (
-                            <TableRow key={day}>
-                              <TableCell className="font-medium">{format(toZonedTime(new Date(selectedYear, months.indexOf(month), day), TIME_ZONE), "do MMMM")}</TableCell>
-                              <TableCell className="text-right">{total.toLocaleString('en-IN', { style: 'currency', currency: 'INR' })}</TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </ScrollArea>
-                  ) : (
-                    <div className="flex h-[250px] flex-col items-center justify-center text-center">
-                        <TrendingDown className="h-12 w-12 text-muted-foreground" />
-                        <p className="mt-4 text-muted-foreground">No daily spending data for this period.</p>
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-              
-              <Card className="lg:col-span-2">
-                <CardHeader>
-                  <CardTitle>Recent Transactions</CardTitle>
-                  <CardDescription>Your last 5 expenses for {month} {selectedYear}.</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <ExpenseList 
-                    expenses={filteredExpenses.slice(0, 5)} 
-                    onEdit={(expense) => setEditingExpense(expense)}
-                    onDelete={(expense) => setDeletingExpense(expense)}
-                  />
-                </CardContent>
-              </Card>
+      {/* Clock Realtime Synchronization */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <Card><CardContent className="pt-4 flex items-center gap-3"><Laptop className="h-5 w-5 text-blue-500" /><div><p className="text-xs text-muted-foreground font-medium">Browser Clock</p><p className="text-sm font-semibold tabular-nums">{clientTime}</p></div></CardContent></Card>
+        <Card><CardContent className="pt-4 flex items-center gap-3"><Server className="h-5 w-5 text-purple-500" /><div><p className="text-xs text-muted-foreground font-medium">App Server Time</p><p className="text-sm font-semibold tabular-nums">{status?.serverTimestamp ? new Date(status.serverTimestamp).toLocaleString() : 'Loading...'}</p></div></CardContent></Card>
+        <Card><CardContent className="pt-4 flex items-center gap-3"><Clock className="h-5 w-5 text-emerald-600" /><div><p className="text-xs text-muted-foreground font-medium">Paytm Response Time</p><p className="text-sm font-bold text-emerald-900 tabular-nums">{portfolio?.paytmApiTimestamp ? new Date(portfolio.paytmApiTimestamp).toLocaleString() : 'No Connection'}</p></div></CardContent></Card>
+      </div>
+
+      {/* Cryptographic token inspector */}
+      <Card className="border-purple-200 bg-purple-50/10">
+        <CardHeader className="pb-2">
+          <CardTitle className="flex items-center gap-2 text-base text-purple-900"><Fingerprint className="h-4 w-4" />JWT Claims Inspector</CardTitle>
+          <CardDescription>Validating Issued At (iat) and Expiration (exp) time claims directly from token payload</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {activeJwtMeta ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
+              <div className="p-3 bg-white border rounded-lg shadow-sm">
+                <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Issued At (iat)</span>
+                <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.iatStr ? new Date(activeJwtMeta.iatStr).toLocaleString() : 'N/A'}</p>
+                <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawIat}</span>
+              </div>
+              <div className="p-3 bg-white border rounded-lg shadow-sm">
+                <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Expires At (exp)</span>
+                <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.expStr ? new Date(activeJwtMeta.expStr).toLocaleString() : 'N/A'}</p>
+                <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawExp}</span>
+              </div>
             </div>
-          </TabsContent>
-        ))}
-      </Tabs>
-      <EditExpenseDialog 
-        expense={editingExpense} 
-        isOpen={!!editingExpense} 
-        onClose={() => setEditingExpense(null)}
-        onUpdateExpense={handleUpdateExpense}
-      />
-      <AlertDialog open={!!deletingExpense} onOpenChange={() => setDeletingExpense(null)}>
-        <AlertDialogContent>
-            <AlertDialogHeader>
-            <AlertDialogTitle>Are you sure?</AlertDialogTitle>
-            <AlertDialogDescription>
-                This action cannot be undone. This will permanently delete the expense
-                "{deletingExpense?.description}".
-            </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDeleteExpense}>Delete</AlertDialogAction>
-            </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+          ) : (
+            <p className="text-xs text-muted-foreground py-2 italic">Authenticate or fetch portfolio metrics to read token payload properties.</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* System Status Matrix Indicators */}
+      <Card>
+        <CardContent className="pt-6">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <StatusIndicator ok={status?.apiKeyConfigured} label="API Key" subtext={status?.apiKeyConfigured ? 'Secured' : 'Missing'} />
+            <StatusIndicator ok={status?.secretConfigured} label="API Secret" subtext={status?.secretConfigured ? 'Secured' : 'Missing'} />
+            <StatusIndicator ok={status?.hasAccessToken && !isTokenError} label="Session State" subtext={status?.hasAccessToken && !isTokenError ? 'Active Token' : 'OAuth Required'} />
+            <StatusIndicator ok={!!portfolio} label="Data Pipeline" subtext={portfolio ? 'Synced' : 'Dormant'} />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Missing configuration banner layout */}
+      {status && (!status.apiKeyConfigured || !status.secretConfigured) && !isLoadingStatus && (
+        <Card className="border-destructive/50">
+          <CardHeader><CardTitle className="flex items-center gap-2 text-destructive"><AlertCircle className="h-5 w-5" />Setup Required</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm text-muted-foreground">Set the following environment variables:</p>
+            <div className="bg-muted rounded-lg p-3 font-mono text-xs space-y-1">
+              <p>PAYTM_MONEY_API_KEY=<span className="text-muted-foreground">your_api_key</span></p>
+              <p>PAYTM_MONEY_SECRET=<span className="text-muted-foreground">your_api_secret</span></p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* RESTORED: Native authentication prompt layout */}
+      {needsAuth && !isLoadingStatus && (
+        <Card className="border-yellow-400/50">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Key className="h-5 w-5 text-yellow-500" />OAuth Handshake Required</CardTitle>
+            <CardDescription>Connect your verified credentials to start streaming historical holdings metrics.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button onClick={startOAuthFlow} className="w-full" size="lg"><ExternalLink className="mr-2 h-4 w-4" />Authorize Paytm Money Session</Button>
+            <div className="mt-3 text-xxs text-muted-foreground bg-muted p-2 rounded font-mono break-all">
+              Callback URI: {typeof window !== 'undefined' ? window.location.origin : ''}/paytm-portfolio
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Handle Lifetime Errors */}
+      {portfolioError && (
+        <Card className="border-destructive/50 bg-destructive/5">
+          <CardContent className="pt-4 flex gap-3">
+            <AlertCircle className="h-5 w-5 text-destructive mt-0.5" />
+            <div className="w-full">
+              <p className="text-sm font-semibold text-destructive">Upstream Lifetime Fault Detected</p>
+              <p className="text-xs font-mono text-slate-600 mt-1 break-all">{portfolioError}</p>
+              <div className="flex gap-2 mt-3">
+                <Button variant="destructive" size="sm" onClick={startOAuthFlow}><RefreshCcw className="mr-2 h-3.5 w-3.5" />Re-authenticate Session</Button>
+                <Button variant="outline" size="sm" onClick={fetchPortfolio}><RefreshCw className="mr-2 h-3.5 w-3.5" />Retry Fetch</Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Holdings Display Grid Layout */}
+      {portfolio && (
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex gap-2 mb-4">
+              {portfolio.source && <Badge variant="outline">{portfolio.source}</Badge>}
+              {portfolio.agentModel && <Badge variant="secondary">{portfolio.agentModel}</Badge>}
+            </div>
+            
+            {portfolio.insights && (
+              <div className="p-3 bg-amber-50/50 border border-amber-200/60 rounded-lg mb-4 text-sm text-amber-900">
+                <div className="flex items-center gap-1.5 font-semibold text-xs mb-1 text-amber-800"><Lightbulb className="h-3.5 w-3.5" /> AI Observations</div>
+                <p>{portfolio.insights}</p>
+              </div>
+            )}
+
+            <ScrollArea className="h-[350px]">
+              <Table>
+                <TableHeader><TableRow><TableHead>Symbol</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">LTP</TableHead><TableHead className="text-right">P&L</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {portfolio.holdings.map((h, i) => (
+                    <TableRow key={i}>
+                      <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
+                      <TableCell className="text-right">{h.quantity}</TableCell>
+                      <TableCell className="text-right">₹{h.last_price.toFixed(2)}</TableCell>
+                      <TableCell className={`text-right ${h.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>{h.pnl_percent.toFixed(2)}%</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
+}
+
+export default function PaytmPortfolioPage() {
+  return <Suspense fallback={<div className="p-8"><Loader2 className="animate-spin text-primary mx-auto h-8 w-8" /></div>}><PaytmPortfolioContent /></Suspense>;
 }
