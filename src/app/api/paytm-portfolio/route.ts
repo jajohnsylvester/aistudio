@@ -138,6 +138,10 @@ export async function GET(request: NextRequest) {
         exp: jwtMeta?.expStr,
       });
 
+      const configuredRefreshInterval = process.env.PORTFOLIO_REFRESH_INTERVAL_SECONDS 
+        ? parseInt(process.env.PORTFOLIO_REFRESH_INTERVAL_SECONDS, 10) 
+        : 300;
+
       return NextResponse.json({
         connected: !!(apiKey && apiSecret),
         hasAccessToken: !!tokenValue,
@@ -149,6 +153,7 @@ export async function GET(request: NextRequest) {
         serverTimestamp: new Date().toISOString(),
         jwtMeta,
         tools: MCP_TOOLS.map(t => t.name),
+        refreshIntervalSeconds: configuredRefreshInterval,
       });
     }
 
@@ -215,7 +220,6 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ error: 'No access token found.', oauthRequired: true }, { status: 401 });
       }
 
-      // Check expiry before making the API call to avoid unnecessary upstream failures
       if (isJwtExpired(cookieToken.value)) {
         logDebug('WARN', 'Access token is expired; clearing cookie and requesting re-auth');
         cookieStore.delete(COOKIE_NAME);
