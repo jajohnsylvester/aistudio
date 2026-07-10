@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown,
   AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
-  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint
+  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -32,6 +32,7 @@ interface MCPStatus {
   serverTimestamp?: string;
   jwtMeta?: JwtMetadata | null;
   tools?: string[];
+  refreshIntervalSeconds?: number;
 }
 
 interface Holding {
@@ -83,6 +84,12 @@ function PaytmPortfolioContent() {
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(false);
   const [clientTime, setClientTime] = useState<string>('');
+  
+  // Custom Automatic Refresh Configuration State (in Seconds)
+  const [refreshInterval, setRefreshInterval] = useState<number>(300); 
+  const [isAutoRefreshEnabled, setIsAutoRefreshEnabled] = useState<boolean>(true);
+  const [secondsUntilNextRefresh, setSecondsUntilNextRefresh] = useState<number>(300);
+
   const { toast } = useToast();
 
   useEffect(() => {
@@ -95,7 +102,13 @@ function PaytmPortfolioContent() {
     setIsLoadingStatus(true);
     try {
       const response = await fetch('/api/paytm-portfolio?action=status', { credentials: 'include' });
-      setStatus(await response.json());
+      const statusData: MCPStatus = await response.json();
+      setStatus(statusData);
+      
+      if (statusData.refreshIntervalSeconds) {
+        setRefreshInterval(statusData.refreshIntervalSeconds);
+        setSecondsUntilNextRefresh(statusData.refreshIntervalSeconds);
+      }
     } catch {
       toast({ variant: 'destructive', title: 'Status check failed.' });
     } finally {
@@ -113,20 +126,20 @@ function PaytmPortfolioContent() {
         setPortfolioError(data.error);
         setPortfolio(null);
 
-        // If the token is expired/rejected upstream, clear the stale cookie and update status
         if (data.tokenExpired || data.oauthRequired) {
           await fetch('/api/paytm-portfolio?action=clear_token', { credentials: 'include' });
           setStatus(prev => prev ? { ...prev, hasAccessToken: false, tokenExpired: true } : prev);
         }
       } else {
         setPortfolio(data);
+        setSecondsUntilNextRefresh(refreshInterval);
       }
     } catch (error: any) {
       setPortfolioError(error.message);
     } finally {
       setIsLoadingPortfolio(false);
     }
-  }, []);
+  }, [refreshInterval]);
 
   const startOAuthFlow = async () => {
     try {
@@ -158,30 +171,51 @@ function PaytmPortfolioContent() {
     handleExchangeToken();
   }, [requestToken, router, checkStatus, toast]);
 
-  // On launch: if no requestToken, check status. If token is expired, clear it so we start fresh.
   useEffect(() => {
     if (requestToken) return;
-    checkStatus().then(() => {
-      // status is set synchronously inside checkStatus via setState, but we need the latest value
-    });
+    checkStatus();
   }, [checkStatus, requestToken]);
 
-  // When status loads and token is expired, clear the cookie cache so next visit is clean
   useEffect(() => {
     if (status && status.hasAccessToken && status.tokenExpired && !requestToken) {
       fetch('/api/paytm-portfolio?action=clear_token', { credentials: 'include' }).then(() => {
-        // Update local status to reflect cleared token
         setStatus(prev => prev ? { ...prev, hasAccessToken: false, tokenExpired: false } : prev);
       });
     }
   }, [status, requestToken]);
 
-  // Auto-fetch portfolio when token is valid (not expired) — display portfolio directly without asking for re-auth
   useEffect(() => {
     if (status?.hasAccessToken && !status?.tokenExpired && !requestToken) {
       fetchPortfolio();
     }
   }, [status?.hasAccessToken, status?.tokenExpired, fetchPortfolio, requestToken]);
+
+  // --- AUTOMATIC REFRESH LOOP ENGINE ---
+  useEffect(() => {
+    if (!status?.hasAccessToken || status?.tokenExpired || !isAutoRefreshEnabled) return;
+
+    const countdownId = setInterval(() => {
+      setSecondsUntilNextRefresh((prev) => {
+        if (prev <= 1) {
+          fetchPortfolio();
+          return refreshInterval;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(countdownId);
+  }, [status?.hasAccessToken, status?.tokenExpired, isAutoRefreshEnabled, refreshInterval, fetchPortfolio]);
+
+  const handleIntervalChange = (seconds: number) => {
+    setRefreshInterval(seconds);
+    setSecondsUntilNextRefresh(seconds);
+    if (seconds === 0) {
+      setIsAutoRefreshEnabled(false);
+    } else {
+      setIsAutoRefreshEnabled(true);
+    }
+  };
 
   const activeJwtMeta = portfolio?.jwtMeta || status?.jwtMeta;
   const isTokenError = portfolioError?.includes('expired') || portfolioError?.includes('token') || portfolioError?.includes('401');
@@ -194,19 +228,40 @@ function PaytmPortfolioContent() {
           <h1 className="text-3xl font-bold tracking-tight">Paytm Money Portfolio Terminal</h1>
           <p className="text-muted-foreground text-sm mt-1">Debugging cryptographic token lifetime bounds</p>
         </div>
-        <Button variant="outline" onClick={() => { checkStatus(); if(status?.hasAccessToken) fetchPortfolio(); }} disabled={isLoadingStatus || isLoadingPortfolio}>
-          <RefreshCw className="mr-2 h-4 w-4" /> Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          {status?.hasAccessToken && !status?.tokenExpired && (
+            <div className="flex items-center gap-2 border rounded-lg p-1.5 bg-slate-50 text-xs font-medium mr-2">
+              <Timer className="h-3.5 w-3.5 text-slate-500" />
+              <span>Interval:</span>
+              <select 
+                value={refreshInterval} 
+                onChange={(e) => handleIntervalChange(Number(e.target.value))}
+                className="bg-transparent border-none outline-none font-semibold text-slate-700 cursor-pointer"
+              >
+                <option value={60}>1 Min</option>
+                <option value={300}>5 Mins</option>
+                <option value={600}>10 Mins</option>
+                <option value={0}>Off</option>
+              </select>
+              {isAutoRefreshEnabled && (
+                <span className="text-xxs text-slate-400 font-mono ml-1">
+                  ({secondsUntilNextRefresh}s)
+                </span>
+              )}
+            </div>
+          )}
+          <Button variant="outline" onClick={() => { checkStatus(); if(status?.hasAccessToken) fetchPortfolio(); }} disabled={isLoadingStatus || isLoadingPortfolio}>
+            <RefreshCw className="mr-2 h-4 w-4" /> Refresh
+          </Button>
+        </div>
       </div>
 
-      {/* Clock Realtime Synchronization */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card><CardContent className="pt-4 flex items-center gap-3"><Laptop className="h-5 w-5 text-blue-500" /><div><p className="text-xs text-muted-foreground font-medium">Browser Clock</p><p className="text-sm font-semibold tabular-nums">{clientTime}</p></div></CardContent></Card>
         <Card><CardContent className="pt-4 flex items-center gap-3"><Server className="h-5 w-5 text-purple-500" /><div><p className="text-xs text-muted-foreground font-medium">App Server Time</p><p className="text-sm font-semibold tabular-nums">{status?.serverTimestamp ? new Date(status.serverTimestamp).toLocaleString() : 'Loading...'}</p></div></CardContent></Card>
         <Card><CardContent className="pt-4 flex items-center gap-3"><Clock className="h-5 w-5 text-emerald-600" /><div><p className="text-xs text-muted-foreground font-medium">Paytm Response Time</p><p className="text-sm font-bold text-emerald-900 tabular-nums">{portfolio?.paytmApiTimestamp ? new Date(portfolio.paytmApiTimestamp).toLocaleString() : 'No Connection'}</p></div></CardContent></Card>
       </div>
 
-      {/* Cryptographic token inspector */}
       <Card className="border-purple-200 bg-purple-50/10">
         <CardHeader className="pb-2">
           <CardTitle className="flex items-center gap-2 text-base text-purple-900"><Fingerprint className="h-4 w-4" />JWT Claims Inspector</CardTitle>
@@ -232,7 +287,6 @@ function PaytmPortfolioContent() {
         </CardContent>
       </Card>
 
-      {/* System Status Matrix Indicators */}
       <Card>
         <CardContent className="pt-6">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -244,7 +298,6 @@ function PaytmPortfolioContent() {
         </CardContent>
       </Card>
 
-      {/* Missing configuration banner layout */}
       {status && (!status.apiKeyConfigured || !status.secretConfigured) && !isLoadingStatus && (
         <Card className="border-destructive/50">
           <CardHeader><CardTitle className="flex items-center gap-2 text-destructive"><AlertCircle className="h-5 w-5" />Setup Required</CardTitle></CardHeader>
@@ -258,7 +311,6 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
-      {/* RESTORED: Native authentication prompt layout */}
       {needsAuth && !isLoadingStatus && (
         <Card className="border-yellow-400/50">
           <CardHeader>
@@ -274,7 +326,6 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
-      {/* Handle Lifetime Errors */}
       {portfolioError && (
         <Card className="border-destructive/50 bg-destructive/5">
           <CardContent className="pt-4 flex gap-3">
@@ -291,7 +342,6 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
-      {/* Holdings Display Grid Layout */}
       {portfolio && (
         <Card>
           <CardContent className="pt-6">
