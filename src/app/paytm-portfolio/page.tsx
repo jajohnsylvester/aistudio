@@ -208,7 +208,6 @@ function PaytmPortfolioContent() {
     });
   }, [portfolio?.holdings, sortField, sortDirection]);
 
-  // Aggregate values across all current rows
   const aggregatedTotals = useMemo(() => {
     if (!portfolio?.holdings || portfolio.holdings.length === 0) {
       return { sumCostPrice: 0, sumLtp: 0, sumCalculatedPnl: 0 };
@@ -415,7 +414,7 @@ function PaytmPortfolioContent() {
                       <TableCell className="text-right font-medium font-mono">{h.quantity}</TableCell>
                       <TableCell className="text-right font-mono">₹{h.average_price.toFixed(2)}</TableCell>
                       <TableCell className="text-right font-semibold font-mono">₹{h.last_price.toFixed(2)}</TableCell>
-                      <TableCell className="text-right font-bold font-mono text-slate-800}>₹{h.current_value.toFixed(2)}</TableCell>
+                      <TableCell className="text-right font-bold font-mono text-slate-800">₹{h.current_value.toFixed(2)}</TableCell>
                       <TableCell className={`text-right font-bold font-mono ${h.pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                         {h.pnl >= 0 ? '+' : ''}₹{h.pnl.toFixed(2)}
                         <span className="text-xxs block font-medium opacity-80">({h.pnl_percent.toFixed(2)}%)</span>
@@ -426,7 +425,7 @@ function PaytmPortfolioContent() {
               </Table>
             </ScrollArea>
 
-            {/* UNIT SUMMARIZATION & FINANCIAL TOTALS MATRIX CARDS */}
+            {/* FINANCIAL TOTALS MATRIX CARDS */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4 border-t pt-4 bg-slate-50/40 p-3 rounded-lg">
               <div className="p-3 bg-white border rounded-lg shadow-2xs">
                 <span className="text-xxs font-bold tracking-wider text-slate-400 uppercase">Sum of Costs (Unit Base)</span>
@@ -453,7 +452,7 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
-      {/* NATIVE OAUTH FALLBACK IF SESSION TIMED OUT */}
+      {/* NATIVE OAUTH FALLBACK */}
       {needsAuth && !isLoadingStatus && (
         <Card className="border-yellow-400/50 bg-yellow-50/10">
           <CardHeader>
