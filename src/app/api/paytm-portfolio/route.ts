@@ -1,14 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { google } from 'googleapis';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// Initialize the standard Google Generative AI client
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-
-// Upstream Google Sheets Credentials Tracking Parameters
+// Upstream Google Sheets Credentials Parameters
 const SPREADSHEET_ID = process.env.GOOGLE_SPREADSHEET_ID || '';
 const clientEmail = process.env.GOOGLE_SHEETS_CLIENT_EMAIL || '';
 const privateKey = (process.env.GOOGLE_SHEETS_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 
 // In-Memory Token Persistence Layer Mock (Matches original architecture expectations)
 let globalSessionToken = '';
@@ -25,7 +22,6 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
 
-  // RESTORED: Core status endpoint mapping matrix
   if (action === 'status') {
     return NextResponse.json({
       connected: true,
@@ -48,7 +44,6 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  // RESTORED: Main holding pipeline query agent
   if (action === 'portfolio') {
     if (!globalSessionToken && process.env.NODE_ENV === 'production') {
       return NextResponse.json({ error: 'OAuth handshake required', oauthRequired: true });
@@ -66,7 +61,7 @@ export async function GET(request: NextRequest) {
       totalPnlPercent,
       holdings: mockHoldings,
       insights: "Overall Portfolio allocation looks solid. Core technical trends show strong multi-sector alignment.",
-      agentModel: "Gemini Pro Unified Engine",
+      agentModel: "Gemini Pro Direct Rest API Engine",
       lastUpdated: new Date().toISOString(),
       paytmApiTimestamp: new Date().toISOString(),
       jwtMeta: {
@@ -78,7 +73,6 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  // RESTORED: Token Handshake exchange parameter logic
   if (action === 'exchange_token') {
     const requestToken = searchParams.get('request_token');
     if (!requestToken) {
@@ -89,14 +83,12 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: true, token: globalSessionToken });
   }
 
-  // RESTORED: Session clearance context bounds
   if (action === 'clear_token') {
     globalSessionToken = '';
     isTokenExpired = true;
     return NextResponse.json({ success: true });
   }
 
-  // RESTORED: OAuth login entry generator points
   if (action === 'login') {
     const apiKey = process.env.PAYTM_API_KEY || 'mock_api_key';
     const redirectUrl = encodeURIComponent(`${request.nextUrl.origin}/paytm-portfolio`);
@@ -110,7 +102,6 @@ export async function POST(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
 
-  // RESTORED: Original MCP Tool Console Invocation Endpoint
   if (action === 'execute_mcp_tool') {
     try {
       const body = await request.json();
@@ -129,32 +120,48 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // ADDED: Sub-Strategy Gemini AI Analysis Engine
+  // UPDATED: Using a direct, standard HTTP fetch framework to contact the Gemini service
   if (action === 'strategy_insights') {
     try {
       const body = await request.json();
       const { strategyName, holdings } = body;
 
       if (!holdings || holdings.length === 0) {
-        return NextResponse.json({ insights: "No active assets mapped to this strategy segment. Add assets to populate data summaries." });
+        return NextResponse.json({ insights: "No active assets mapped to this strategy segment." });
+      }
+
+      if (!GEMINI_API_KEY) {
+        throw new Error("GEMINI_API_KEY configuration variable is missing.");
       }
 
       const formattedData = holdings.map((h: any) => 
         `- ${h.trading_symbol}: ${h.quantity} units | Cost: ₹${h.average_price.toFixed(2)} | LTP: ₹${h.last_price.toFixed(2)} | P&L: ₹${h.pnl.toFixed(2)} (${h.pnl_percent.toFixed(2)}%)`
       ).join('\n');
 
-      const prompt = `You are a financial analyst analyzing a localized custom trading strategy sub-bucket named "${strategyName}". Assess the capital safety and technical performance based on its mapped asset components:\n\n${formattedData}\n\nProvide direct, actionable alpha generation advice without generic fluff.`;
+      const promptText = `You are a financial analyst analyzing a localized custom trading strategy sub-bucket named "${strategyName}". Assess the capital safety and technical performance based on its mapped asset components:\n\n${formattedData}\n\nProvide direct, actionable alpha generation advice without generic fluff.`;
 
-      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-      const aiResponse = await model.generateContent(prompt);
-      
-      return NextResponse.json({ insights: aiResponse.response.text() });
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: promptText }] }]
+        })
+      });
+
+      if (!response.ok) {
+        const errorDetails = await response.text();
+        throw new Error(`Gemini Server Gateway rejected processing request: ${errorDetails}`);
+      }
+
+      const resData = await response.json();
+      const parsedInsights = resData.candidates?.[0]?.content?.parts?.[0]?.text || 'No explicit analytical insights generated.';
+
+      return NextResponse.json({ insights: parsedInsights });
     } catch (e: any) {
       return NextResponse.json({ error: e.message }, { status: 500 });
     }
   }
 
-  // ADDED: Push Strategies Matrix mapping arrays straight into Google Sheets without wiping sheet formatting
   if (action === 'save_strategies') {
     try {
       const body = await request.json();
@@ -191,13 +198,11 @@ export async function POST(request: NextRequest) {
         ]);
       });
 
-      // Clear layout value structures safely without removing sheet table stylings
       await sheets.spreadsheets.values.clear({
         spreadsheetId: SPREADSHEET_ID,
         range: 'Strategies!A1:F100',
       });
 
-      // Commit changes directly back to sheet bounds
       await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
         range: 'Strategies!A1',
