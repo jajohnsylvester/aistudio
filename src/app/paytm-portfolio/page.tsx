@@ -94,25 +94,28 @@ function PaytmPortfolioContent() {
     return () => clearInterval(timer);
   }, []);
 
+  // FIX: Decoupled selectedTool out of dependency sequence to eliminate client loop crashes
   const checkStatus = useCallback(async () => {
     setIsLoadingStatus(true);
     try {
       const response = await fetch('/api/paytm-portfolio?action=status', { credentials: 'include' });
       const statusData: MCPStatus = await response.json();
       setStatus(statusData);
+      
       if (statusData.refreshIntervalSeconds) {
         setRefreshInterval(statusData.refreshIntervalSeconds);
         setSecondsUntilNextRefresh(statusData.refreshIntervalSeconds);
       }
-      if (statusData.tools && statusData.tools.length > 0 && !selectedTool) {
-        setSelectedTool(statusData.tools[0].name);
+      
+      if (statusData.tools && statusData.tools.length > 0) {
+        setSelectedTool(prev => prev || statusData.tools![0].name);
       }
     } catch {
       toast({ variant: 'destructive', title: 'Status check failed.' });
     } finally {
       setIsLoadingStatus(false);
     }
-  }, [selectedTool, toast]);
+  }, [toast]);
 
   const fetchPortfolio = useCallback(async () => {
     setIsLoadingPortfolio(true);
