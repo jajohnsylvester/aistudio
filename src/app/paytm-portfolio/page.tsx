@@ -6,12 +6,9 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Input } from '@/components/ui/input';
-import { Switch } from '@/components/ui/switch';
-import { Label } from '@/components/ui/label';
 import {
   Loader2, RefreshCw, AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
-  RefreshCcw, Server, Bot, Clock, Laptop, Fingerprint, Timer, Play, ChevronDown, ChevronUp, ArrowUpDown, Plus, Save, Trash2
+  RefreshCcw, Server, Bot, Clock, Laptop, Fingerprint, Timer, Play, ChevronDown, ChevronUp, ArrowUpDown
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -24,6 +21,7 @@ interface MCPStatus {
   secretConfigured: boolean;
   serverTimestamp?: string;
   jwtMeta?: any;
+  tools?: any[];
   refreshIntervalSeconds?: number;
 }
 
@@ -46,19 +44,14 @@ interface PortfolioData {
   totalPnl: number;
   totalPnlPercent: number;
   holdings: Holding[];
+  insights: string;
   agentModel?: string;
   lastUpdated: string;
   paytmApiTimestamp?: string;
+  jwtMeta?: any;
 }
 
-interface CategoryData {
-  name: string;
-  allocatedHoldings: { symbol: string; units: number }[];
-  geminiInsightsEnabled: boolean;
-  insightsText?: string;
-  isAnalyzing?: boolean;
-}
-
+// RESTORED: Status indicator matrix icon helper component
 function StatusIndicator({ ok, label, subtext }: { ok: boolean | undefined; label: string; subtext: string }) {
   return (
     <div className="flex items-center gap-3">
@@ -76,6 +69,7 @@ export default function PaytmPortfolioPage() {
 }
 
 function PaytmPortfolioContent() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const requestToken = searchParams.get('request_token');
   const { toast } = useToast();
@@ -87,22 +81,25 @@ function PaytmPortfolioContent() {
   const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(false);
   const [clientTime, setClientTime] = useState<string>('');
 
-  // Dropdown mapping structures
-  const [selectedHoldingSymbol, setSelectedHoldingSymbol] = useState<Record<string, string>>({});
-  const [holdingUnits, setHoldingUnits] = useState<Record<string, string>>({});
+  // Auto-Refresh States
+  const [refreshInterval, setRefreshInterval] = useState<number>(300);
+  const [isAutoRefreshEnabled, setIsAutoRefreshEnabled] = useState<boolean>(true);
+  const [secondsUntilNextRefresh, setSecondsUntilNextRefresh] = useState<number>(300);
 
-  // Dynamic Framework Categories Container
-  const [categories, setCategories] = useState<CategoryData[]>([
-    { name: 'Coffee Can Portfolio', allocatedHoldings: [], geminiInsightsEnabled: false },
-    { name: 'Magic Formula Joel GreenBlatt', allocatedHoldings: [], geminiInsightsEnabled: false },
-    { name: 'Prasenjit Paul', allocatedHoldings: [], geminiInsightsEnabled: false }
-  ]);
-  const [newCategoryName, setNewCategoryName] = useState('');
-  const [isSavingToSheets, setIsSavingToSheets] = useState(false);
+  // Sorting State
+  const [sortField, setSortField] = useState<keyof Holding>('trading_symbol');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
 
-  // Layout View Controls
-  const [isClocksExpanded, setIsClocksExpanded] = useState(false);
-  const [isStatusMatrixExpanded, setIsStatusMatrixExpanded] = useState(false);
+  // Collapsible Component States
+  const [isClocksExpanded, setIsClocksExpanded] = useState(true);
+  const [isJwtExpanded, setIsJwtExpanded] = useState(true);
+  const [isStatusMatrixExpanded, setIsStatusMatrixExpanded] = useState(true);
+
+  // MCP Execution Console States
+  const [selectedTool, setSelectedTool] = useState<string>('');
+  const [toolArguments, setToolArguments] = useState<string>('{}');
+  const [mcpResult, setMcpResult] = useState<any>(null);
+  const [isExecutingTool, setIsExecutingTool] = useState<boolean>(false);
 
   useEffect(() => {
     setClientTime(new Date().toLocaleString());
@@ -113,11 +110,20 @@ function PaytmPortfolioContent() {
   const checkStatus = useCallback(async () => {
     setIsLoadingStatus(true);
     try {
-      const response = await fetch('/api/paytm-portfolio?action=status');
+      const response = await fetch('/api/paytm-portfolio?action=status', { credentials: 'include' });
       const statusData: MCPStatus = await response.json();
       setStatus(statusData);
+      
+      if (statusData.refreshIntervalSeconds) {
+        setRefreshInterval(statusData.refreshIntervalSeconds);
+        setSecondsUntilNextRefresh(statusData.refreshIntervalSeconds);
+      }
+      
+      if (statusData.tools && statusData.tools.length > 0) {
+        setSelectedTool(prev => prev || statusData.tools![0].name);
+      }
     } catch {
-      toast({ variant: 'destructive', title: 'Status pipeline validation check aborted.' });
+      toast({ variant: 'destructive', title: 'Status check failed.' });
     } finally {
       setIsLoadingStatus(false);
     }
@@ -127,354 +133,367 @@ function PaytmPortfolioContent() {
     setIsLoadingPortfolio(true);
     setPortfolioError(null);
     try {
-      const response = await fetch('/api/paytm-portfolio?action=portfolio');
+      const response = await fetch('/api/paytm-portfolio?action=portfolio', { credentials: 'include' });
       const data = await response.json();
       if (data.error) {
         setPortfolioError(data.error);
         setPortfolio(null);
+        if (data.tokenExpired || data.oauthRequired) {
+          await fetch('/api/paytm-portfolio?action=clear_token', { credentials: 'include' });
+          setStatus(prev => prev ? { ...prev, hasAccessToken: false, tokenExpired: true } : prev);
+        }
       } else {
         setPortfolio(data);
+        setSecondsUntilNextRefresh(refreshInterval);
       }
     } catch (error: any) {
       setPortfolioError(error.message);
     } finally {
       setIsLoadingPortfolio(false);
     }
-  }, []);
+  }, [refreshInterval]);
 
   useEffect(() => {
-    checkStatus();
-    fetchPortfolio();
-  }, [checkStatus, fetchPortfolio]);
-
-  // Operational Functions for Categories Structure Handling
-  const handleAddCategory = () => {
-    const formatName = newCategoryName.trim();
-    if (!formatName) return;
-
-    if (categories.some(c => c.name.toLowerCase() === formatName.toLowerCase())) {
-      toast({ variant: 'destructive', title: 'Operational Abort', description: 'Strategy profile label matches an existing registry.' });
-      return;
+    if (!requestToken) return;
+    async function handleExchangeToken() {
+      setIsLoadingPortfolio(true);
+      try {
+        const response = await fetch(`/api/paytm-portfolio?action=exchange_token&request_token=${encodeURIComponent(requestToken!)}`, { credentials: 'include' });
+        if (!response.ok) throw new Error('Exchange failed');
+        toast({ title: 'Success', description: 'Read session token registered successfully.' });
+        router.replace('/paytm-portfolio');
+        checkStatus();
+      } catch (err: any) {
+        toast({ variant: 'destructive', title: 'Exchange Error', description: err.message });
+      } finally {
+        setIsLoadingPortfolio(false);
+      }
     }
+    handleExchangeToken();
+  }, [requestToken, router, checkStatus, toast]);
 
-    setCategories([...categories, { name: formatName, allocatedHoldings: [], geminiInsightsEnabled: false }]);
-    setNewCategoryName('');
-    toast({ title: 'Category Declared', description: `Registered Strategy Matrix: "${formatName}"` });
+  useEffect(() => {
+    if (!requestToken) checkStatus();
+  }, [checkStatus, requestToken]);
+
+  useEffect(() => {
+    if (status?.hasAccessToken && !status?.tokenExpired && !requestToken) {
+      fetchPortfolio();
+    }
+  }, [status?.hasAccessToken, status?.tokenExpired, fetchPortfolio, requestToken]);
+
+  useEffect(() => {
+    if (!status?.hasAccessToken || status?.tokenExpired || !isAutoRefreshEnabled) return;
+    const countdownId = setInterval(() => {
+      setSecondsUntilNextRefresh((prev) => {
+        if (prev <= 1) {
+          fetchPortfolio();
+          return refreshInterval;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(countdownId);
+  }, [status?.hasAccessToken, status?.tokenExpired, isAutoRefreshEnabled, refreshInterval, fetchPortfolio]);
+
+  const handleIntervalChange = (seconds: number) => {
+    setRefreshInterval(seconds);
+    setSecondsUntilNextRefresh(seconds);
+    setIsAutoRefreshEnabled(seconds !== 0);
   };
 
-  const handleAddHoldingToCategory = (catIndex: number) => {
-    const catName = categories[catIndex].name;
-    const symbol = selectedHoldingSymbol[catName];
-    const unitCount = parseFloat(holdingUnits[catName]);
-
-    if (!symbol || isNaN(unitCount) || unitCount <= 0) {
-      toast({ variant: 'destructive', title: 'Validation Fault', description: 'Verify asset assignments and unit allocations are positive values.' });
-      return;
-    }
-
-    const updated = [...categories];
-    const itemIdx = updated[catIndex].allocatedHoldings.findIndex(h => h.symbol === symbol);
-
-    if (itemIdx > -1) {
-      updated[catIndex].allocatedHoldings[itemIdx].units += unitCount;
+  const toggleSort = (field: keyof Holding) => {
+    if (sortField === field) {
+      setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
     } else {
-      updated[catIndex].allocatedHoldings.push({ symbol, units: unitCount });
+      setSortField(field);
+      setSortDirection('asc');
     }
-
-    setCategories(updated);
-    // Clearing input registers
-    setHoldingUnits(prev => ({ ...prev, [catName]: '' }));
-    toast({ title: 'Position Appended', description: `Injected ${unitCount} units of ${symbol} into ${catName}.` });
   };
 
-  const handleRemoveHoldingFromCategory = (catIdx: number, holdingIdx: number) => {
-    const updated = [...categories];
-    updated[catIdx].allocatedHoldings.splice(holdingIdx, 1);
-    setCategories(updated);
-    toast({ title: 'Allocation Removed', description: 'Purged target investment layer segment configuration.' });
-  };
+  const sortedHoldings = useMemo(() => {
+    if (!portfolio?.holdings) return [];
+    return [...portfolio.holdings].sort((a, b) => {
+      const valA = a[sortField];
+      const valB = b[sortField];
+      if (typeof valA === 'string' && typeof valB === 'string') {
+        return sortDirection === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
+      }
+      return sortDirection === 'asc' ? (valA as number) - (valB as number) : (valB as number) - (valA as number);
+    });
+  }, [portfolio?.holdings, sortField, sortDirection]);
 
-  // Execution Flow for Gemini Insights Matrix Generation
-  const handleToggleGeminiInsights = async (catIdx: number, checked: boolean) => {
-    const updated = [...categories];
-    updated[catIdx].geminiInsightsEnabled = checked;
-
-    if (!checked) {
-      updated[catIdx].insightsText = undefined;
-      setCategories(updated);
-      return;
+  const aggregatedTotals = useMemo(() => {
+    if (!portfolio?.holdings || portfolio.holdings.length === 0) {
+      return { sumCostPrice: 0, sumLtp: 0, sumCalculatedPnl: 0 };
     }
+    const sumCostPrice = portfolio.holdings.reduce((sum, h) => sum + h.average_price, 0);
+    const sumLtp = portfolio.holdings.reduce((sum, h) => sum + h.last_price, 0);
+    return {
+      sumCostPrice,
+      sumLtp,
+      sumCalculatedPnl: sumLtp - sumCostPrice
+    };
+  }, [portfolio?.holdings]);
 
-    if (updated[catIdx].allocatedHoldings.length === 0) {
-      toast({ variant: 'destructive', title: 'Context Construction Blocked', description: 'We cannot prompt Gemini on empty portfolio buckets.' });
-      updated[catIdx].geminiInsightsEnabled = false;
-      setCategories(updated);
-      return;
-    }
-
-    updated[catIdx].isAnalyzing = true;
-    setCategories([...updated]);
-
+  const runMcpToolCall = async () => {
+    if (!selectedTool) return;
+    setIsExecutingTool(true);
+    setMcpResult(null);
     try {
-      // Formulate metadata boundaries parsing matching indices values
-      const segmentDetails = updated[catIdx].allocatedHoldings.map(ah => {
-        const referenceAsset = portfolio?.holdings.find(h => h.trading_symbol === ah.symbol);
-        return {
-          symbol: ah.symbol,
-          allocatedUnits: ah.units,
-          sector: referenceAsset?.sector || 'General',
-          pnl: referenceAsset ? (referenceAsset.last_price - referenceAsset.average_price) * ah.units : 0
-        };
-      });
-
-      const response = await fetch('/api/paytm-portfolio?action=category_insights', {
+      const response = await fetch('/api/paytm-portfolio?action=execute_mcp_tool', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ categoryName: updated[catIdx].name, holdings: segmentDetails })
+        body: JSON.stringify({ toolName: selectedTool, arguments: JSON.parse(toolArguments) })
       });
-
-      const data = await response.json();
-      const latest = [...categories];
-      latest[catIdx].insightsText = data.insights || 'No insight text patterns generated.';
-      latest[catIdx].isAnalyzing = false;
-      setCategories(latest);
-    } catch {
-      const fallback = [...categories];
-      fallback[catIdx].isAnalyzing = false;
-      fallback[catIdx].geminiInsightsEnabled = false;
-      setCategories(fallback);
-      toast({ variant: 'destructive', title: 'Inference pipeline failure.' });
-    }
-  };
-
-  // Synchronizing Strategy Arrays to Google Sheets Database Table
-  const handleSaveToGoogleSheets = async () => {
-    setIsSavingToSheets(true);
-    try {
-      const flatDataMatrix = categories.flatMap(cat =>
-        cat.allocatedHoldings.map(h => ({
-          category: cat.name,
-          symbol: h.symbol,
-          units: h.units
-        }))
-      );
-
-      const response = await fetch('/api/paytm-portfolio?action=save_sheets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ matrix: flatDataMatrix })
-      });
-
-      if (!response.ok) throw new Error('Failed to update spreadsheet data cells.');
-
-      toast({ title: 'Google Sheets Synced', description: 'Holdings allocation and units written successfully to page(1).' });
+      setMcpResult(await response.json());
     } catch (err: any) {
-      toast({ variant: 'destructive', title: 'Spreadsheet Pipeline Fault', description: err.message });
+      setMcpResult({ error: err.message });
     } finally {
-      setIsSavingToSheets(false);
+      setIsExecutingTool(false);
     }
   };
+
+  const activeJwtMeta = portfolio?.jwtMeta || status?.jwtMeta;
+  const needsAuth = status && status.apiKeyConfigured && status.secretConfigured && (!status.hasAccessToken || status.tokenExpired);
 
   return (
     <div className="flex flex-col gap-6 p-4 max-w-7xl mx-auto">
-      {/* HEADER CONTROLS ACTIONS */}
+      {/* HEADER CONTROLS */}
       <div className="flex items-center justify-between flex-wrap gap-3 border-b pb-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-slate-900">Paytm Money Portfolio Terminal</h1>
-          <p className="text-muted-foreground text-sm mt-1">Strategic Allocation Management Hub</p>
+          <p className="text-muted-foreground text-sm mt-1">Debugging cryptographic token lifetime bounds</p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="default" className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={handleSaveToGoogleSheets} disabled={isSavingToSheets}>
-            {isSavingToSheets ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />} Save to Sheets
-          </Button>
-          <Button variant="outline" onClick={() => { checkStatus(); fetchPortfolio(); }} disabled={isLoadingStatus || isLoadingPortfolio}>
-            <RefreshCw className="mr-2 h-4 w-4" /> Refresh Feed
+          {status?.hasAccessToken && !status?.tokenExpired && (
+            <div className="flex items-center gap-2 border rounded-lg p-1.5 bg-slate-50 text-xs font-medium">
+              <Timer className="h-3.5 w-3.5 text-slate-500" />
+              <span>Interval:</span>
+              <select 
+                value={refreshInterval} 
+                onChange={(e) => handleIntervalChange(Number(e.target.value))}
+                className="bg-transparent border-none outline-none font-semibold text-slate-700 cursor-pointer"
+              >
+                <option value={60}>1 Min</option>
+                <option value={300}>5 Mins</option>
+                <option value={600}>10 Mins</option>
+                <option value={0}>Off</option>
+              </select>
+              {isAutoRefreshEnabled && <span className="text-xxs text-slate-400 font-mono">({secondsUntilNextRefresh}s)</span>}
+            </div>
+          )}
+          <Button variant="outline" onClick={() => { checkStatus(); if(status?.hasAccessToken) fetchPortfolio(); }} disabled={isLoadingStatus || isLoadingPortfolio}>
+            <RefreshCw className="mr-2 h-4 w-4" /> Refresh
           </Button>
         </div>
       </div>
 
-      {/* STRATEGY EXPANSION INITIALIZER CONTROLS */}
-      <Card className="border-slate-200 shadow-sm">
-        <CardHeader className="pb-4">
-          <CardTitle className="text-base font-bold text-slate-800">Initialize Custom Allocation Category</CardTitle>
-          <CardDescription>Append structural buckets alongside standard tracking templates</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex gap-2 max-w-md">
-            <Input 
-              placeholder="e.g. Low Beta Dividends, Smallcap Momentum" 
-              value={newCategoryName} 
-              onChange={(e) => setNewCategoryName(e.target.value)}
-            />
-            <Button onClick={handleAddCategory} className="flex-shrink-0"><Plus className="h-4 w-4 mr-1" /> Add Strategy</Button>
+      {/* COLLAPSIBLE 1: SYSTEM CLOCKS METRICS */}
+      <Card>
+        <CardHeader className="py-3 flex flex-row items-center justify-between cursor-pointer select-none" onClick={() => setIsClocksExpanded(!isClocksExpanded)}>
+          <div className="flex items-center gap-2">
+            <Clock className="h-4 w-4 text-slate-500" />
+            <CardTitle className="text-sm font-semibold">System Synchronization Latency Matrix</CardTitle>
           </div>
-        </CardContent>
+          {isClocksExpanded ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
+        </CardHeader>
+        {isClocksExpanded && (
+          <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+            <div className="p-3 bg-slate-50 border rounded-lg flex items-center gap-3">
+              <Laptop className="h-5 w-5 text-blue-500" />
+              <div><p className="text-xxs text-muted-foreground uppercase font-bold tracking-wider">Browser Clock</p><p className="text-sm font-medium tabular-nums">{clientTime}</p></div>
+            </div>
+            <div className="p-3 bg-slate-50 border rounded-lg flex items-center gap-3">
+              <Server className="h-5 w-5 text-purple-500" />
+              <div><p className="text-xxs text-muted-foreground uppercase font-bold tracking-wider">App Server Time</p><p className="text-sm font-medium tabular-nums">{status?.serverTimestamp ? new Date(status.serverTimestamp).toLocaleString() : 'Synchronizing...'}</p></div>
+            </div>
+            <div className="p-3 bg-slate-50 border rounded-lg flex items-center gap-3">
+              <Clock className="h-5 w-5 text-emerald-600" />
+              <div><p className="text-xxs text-muted-foreground uppercase font-bold tracking-wider">Paytm Response Time</p><p className="text-sm font-medium tabular-nums text-emerald-800">{portfolio?.paytmApiTimestamp ? new Date(portfolio.paytmApiTimestamp).toLocaleString() : 'No connection established'}</p></div>
+            </div>
+          </CardContent>
+        )}
       </Card>
 
-      {/* STRATEGIC CATEGORY RENDER VIEWS PANEL */}
-      <div className="flex flex-col gap-6">
-        {categories.map((category, catIdx) => (
-          <Card key={category.name} className="border-slate-200 overflow-hidden shadow-xs">
-            <CardHeader className="bg-slate-50/70 flex flex-row items-center justify-between border-b py-3 flex-wrap gap-2">
-              <div>
-                <CardTitle className="text-md font-bold text-slate-800">{category.name}</CardTitle>
-                <CardDescription className="text-xxs">Classified Allocation Sub-segment</CardDescription>
+      {/* COLLAPSIBLE 2: CRYPTOGRAPHIC JWT CLAIMS INSPECTOR */}
+      <Card className="border-purple-200 bg-purple-50/5">
+        <CardHeader className="py-3 flex flex-row items-center justify-between cursor-pointer select-none" onClick={() => setIsJwtExpanded(!isJwtExpanded)}>
+          <div className="flex items-center gap-2 text-purple-900">
+            <Fingerprint className="h-4 w-4" />
+            <CardTitle className="text-sm font-semibold">JWT Scoped Claims Cryptographic Inspector</CardTitle>
+          </div>
+          {isJwtExpanded ? <ChevronUp className="h-4 w-4 text-purple-400" /> : <ChevronDown className="h-4 w-4 text-purple-400" />}
+        </CardHeader>
+        {isJwtExpanded && (
+          <CardContent className="pt-2">
+            {activeJwtMeta ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-3 bg-white border rounded-lg shadow-sm">
+                  <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Issued At (iat)</span>
+                  <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.iatStr ? new Date(activeJwtMeta.iatStr).toLocaleString() : 'N/A'}</p>
+                  <span className="text-xxs text-slate-400 block mt-0.5">Unix: {activeJwtMeta.rawIat}</span>
+                </div>
+                <div className="p-3 bg-white border rounded-lg shadow-sm">
+                  <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Expires At (exp)</span>
+                  <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.expStr ? new Date(activeJwtMeta.expStr).toLocaleString() : 'N/A'}</p>
+                  <span className="text-xxs text-slate-400 block mt-0.5">Unix: {activeJwtMeta.rawExp}</span>
+                </div>
               </div>
-              <div className="flex items-center gap-2 bg-white px-3 py-1 border rounded-md shadow-3xs">
-                <Switch 
-                  id={`gemini-toggle-${catIdx}`} 
-                  checked={category.geminiInsightsEnabled} 
-                  onCheckedChange={(checked) => handleToggleGeminiInsights(catIdx, checked)}
-                />
-                <Label htmlFor={`gemini-toggle-${catIdx}`} className="text-xs font-semibold flex items-center gap-1 cursor-pointer text-slate-700">
-                  <Bot className="h-3.5 w-3.5 text-indigo-500" /> Gemini Insights
-                </Label>
-              </div>
-            </CardHeader>
-
-            <CardContent className="pt-4">
-              {/* Asset Injector Dynamic Inputs Panel */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end bg-slate-50/60 p-3 rounded-lg border mb-4">
-                <div>
-                  <label className="text-xxs font-bold text-slate-500 block mb-1 uppercase tracking-wide">Select Available Asset</label>
-                  <select
-                    className="w-full h-9 rounded-md border border-input bg-background px-3 py-1 text-xs shadow-3xs focus:outline-none focus:ring-1 focus:ring-ring"
-                    value={selectedHoldingSymbol[category.name] || ''}
-                    onChange={(e) => setSelectedHoldingSymbol(prev => ({ ...prev, [category.name]: e.target.value }))}
-                  >
-                    <option value="">-- Choose Share --</option>
-                    {portfolio?.holdings.map(h => (
-                      <option key={h.trading_symbol} value={h.trading_symbol}>{h.trading_symbol} (LTP: ₹{h.last_price})</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xxs font-bold text-slate-500 block mb-1 uppercase tracking-wide">Units (Quantity)</label>
-                  <Input 
-                    type="number" 
-                    placeholder="Allocated asset volume"
-                    value={holdingUnits[category.name] || ''}
-                    onChange={(e) => setHoldingUnits(prev => ({ ...prev, [category.name]: e.target.value }))}
-                  />
-                </div>
-                <Button variant="outline" onClick={() => handleAddHoldingToCategory(catIdx)} className="w-full bg-white hover:bg-slate-50 text-xs">
-                  Allocate Strategy Block
-                </Button>
-              </div>
-
-              {/* Categorized Allocation Datatable */}
-              {category.allocatedHoldings.length > 0 ? (
-                <div className="border rounded-md overflow-hidden">
-                  <Table>
-                    <TableHeader className="bg-slate-50/40">
-                      <TableRow>
-                        <TableHead className="h-8 text-xxs font-bold uppercase">Symbol</TableHead>
-                        <TableHead className="h-8 text-right text-xxs font-bold uppercase">Allocated Units</TableHead>
-                        <TableHead className="h-8 text-right text-xxs font-bold uppercase">Current Value</TableHead>
-                        <TableHead className="h-8 text-center text-xxs font-bold uppercase">Action</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {category.allocatedHoldings.map((h, hIdx) => {
-                        const matchingPrice = portfolio?.holdings.find(ph => ph.trading_symbol === h.symbol)?.last_price || 0;
-                        return (
-                          <TableRow key={h.symbol} className="hover:bg-slate-50/40">
-                            <TableCell className="py-2 font-bold text-slate-800">{h.symbol}</TableCell>
-                            <TableCell className="py-2 text-right font-mono text-xs">{h.units}</TableCell>
-                            <TableCell className="py-2 text-right font-mono text-xs font-semibold">₹{(h.units * matchingPrice).toFixed(2)}</TableCell>
-                            <TableCell className="py-2 text-center">
-                              <Button variant="ghost" size="icon" className="h-6 w-6 text-red-500 hover:text-red-700" onClick={() => handleRemoveHoldingFromCategory(catIdx, hIdx)}>
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </Button>
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
-                </div>
-              ) : (
-                <p className="text-xs text-muted-foreground italic text-center py-6 bg-slate-50/10 border border-dashed rounded-md">No strategic capital allocated to this layout structure bucket yet.</p>
-              )}
-
-              {/* Conditional Segment Specific Gemini Analysis Windows */}
-              {category.geminiInsightsEnabled && (
-                <div className="mt-4 border border-indigo-100 bg-indigo-50/10 rounded-lg p-3">
-                  <h4 className="text-xs font-bold text-indigo-900 flex items-center gap-1.5 mb-2">
-                    <Lightbulb className="h-4 w-4 text-amber-500" /> Segment Strategy Context Audit
-                  </h4>
-                  {category.isAnalyzing ? (
-                    <div className="flex items-center gap-2 text-xs text-slate-500 py-1 font-medium">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-600" /> Computing portfolio structure variance anomalies...
-                    </div>
-                  ) : (
-                    <p className="text-xs text-slate-700 whitespace-pre-line leading-relaxed font-medium">
-                      {category.insightsText}
-                    </p>
-                  )}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
-      {/* COLLAPSIBLE REFERENCE ARCHIVES GRID */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Core Asset Custody Vault Log */}
-        {portfolio && (
-          <Card className="border-slate-200">
-            <CardHeader className="py-3 flex flex-row items-center justify-between cursor-pointer select-none" onClick={() => setIsStatusMatrixExpanded(!isStatusMatrixExpanded)}>
-              <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-600">Available Custodial Demat Inventory Reference Feed</CardTitle>
-              {isStatusMatrixExpanded ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
-            </CardHeader>
-            {isStatusMatrixExpanded && (
-              <CardContent className="pt-0">
-                <ScrollArea className="h-[200px] rounded-md border">
-                  <Table>
-                    <TableHeader className="bg-slate-50 sticky top-0 z-10">
-                      <TableRow>
-                        <TableHead className="h-7 text-xxs">Symbol</TableHead>
-                        <TableHead className="h-7 text-right text-xxs">Inventory Qty</TableHead>
-                        <TableHead className="h-7 text-right text-xxs">LTP</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {portfolio.holdings.map((h, i) => (
-                        <TableRow key={i} className="hover:bg-slate-50/50">
-                          <TableCell className="py-1.5 font-semibold text-slate-800 text-xs">{h.trading_symbol}</TableCell>
-                          <TableCell className="py-1.5 text-right font-mono text-xs">{h.quantity}</TableCell>
-                          <TableCell className="py-1.5 text-right font-mono text-xs">₹{h.last_price.toFixed(2)}</TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </ScrollArea>
-              </CardContent>
+            ) : (
+              <p className="text-xs text-muted-foreground italic py-2">Execute authentication credentials session maps to read claims metadata bounds.</p>
             )}
-          </Card>
+          </CardContent>
         )}
+      </Card>
 
-        {/* Latency Matrix Monitoring Sync Metrics */}
-        <Card className="border-slate-200">
-          <CardHeader className="py-3 flex flex-row items-center justify-between cursor-pointer select-none" onClick={() => setIsClocksExpanded(!isClocksExpanded)}>
-            <CardTitle className="text-xs font-bold uppercase tracking-wider text-slate-600">System Synchronization Latency Matrix</CardTitle>
-            {isClocksExpanded ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
+      {/* COLLAPSIBLE 3: GATEWAY KEY STATUS MATRIX */}
+      <Card>
+        <CardHeader className="py-3 flex flex-row items-center justify-between cursor-pointer select-none" onClick={() => setIsStatusMatrixExpanded(!isStatusMatrixExpanded)}>
+          <div className="flex items-center gap-2">
+            <Key className="h-4 w-4 text-slate-500" />
+            <CardTitle className="text-sm font-semibold">Upstream Application Gateway Key Status Matrix</CardTitle>
+          </div>
+          {isStatusMatrixExpanded ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
+        </CardHeader>
+        {isStatusMatrixExpanded && (
+          <CardContent className="pt-2">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <StatusIndicator ok={status?.apiKeyConfigured} label="API Key" subtext={status?.apiKeyConfigured ? 'Secured' : 'Missing'} />
+              <StatusIndicator ok={status?.secretConfigured} label="API Secret" subtext={status?.secretConfigured ? 'Secured' : 'Missing'} />
+              <StatusIndicator ok={status?.hasAccessToken} label="Session Scopes" subtext={status?.hasAccessToken ? 'Active Scoped Read Token' : 'OAuth Required'} />
+              <StatusIndicator ok={!!portfolio} label="Data Pipeline" subtext={portfolio ? 'Synced' : 'Dormant'} />
+            </div>
+          </CardContent>
+        )}
+      </Card>
+
+      {/* DEEP INSIGHTS PANEL */}
+      {portfolio?.insights && (
+        <Card className="border-amber-200 bg-amber-50/20 shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-base text-amber-900">
+              <Lightbulb className="h-5 w-5 text-amber-600" /> Deep Investment Allocation Summary (Gemini Analysis)
+            </CardTitle>
           </CardHeader>
-          {isClocksExpanded && (
-            <CardContent className="grid grid-cols-1 gap-2 pt-0 text-xs font-medium text-slate-700">
-              <div className="p-2 bg-slate-50 border rounded flex justify-between items-center">
-                <span className="text-slate-500">Browser Clock:</span>
-                <span className="font-mono tabular-nums">{clientTime}</span>
-              </div>
-              <div className="p-2 bg-slate-50 border rounded flex justify-between items-center">
-                <span className="text-slate-500">App Server Time:</span>
-                <span className="font-mono tabular-nums">{status?.serverTimestamp ? new Date(status.serverTimestamp).toLocaleTimeString() : 'Syncing...'}</span>
-              </div>
-            </CardContent>
-          )}
+          <CardContent className="text-sm text-slate-700 space-y-4 leading-relaxed whitespace-pre-line font-medium">
+            {portfolio.insights}
+          </CardContent>
         </Card>
-      </div>
+      )}
+
+      {/* MAIN DATA TERMINAL TABLE */}
+      {portfolio && (
+        <Card className="shadow-sm">
+          <CardContent className="pt-6">
+            <div className="flex justify-between items-center mb-4 flex-wrap gap-2">
+              <h2 className="text-lg font-bold text-slate-800">Demat Depository Assets Layout Table</h2>
+              <div className="flex gap-2 text-xxs font-mono">
+                {portfolio.agentModel && <Badge variant="secondary">{portfolio.agentModel}</Badge>}
+                <Badge variant="outline">Sorted By: {sortField} ({sortDirection})</Badge>
+              </div>
+            </div>
+
+            <ScrollArea className="h-[380px] rounded-md border">
+              <Table>
+                <TableHeader className="bg-slate-50/80 sticky top-0 backdrop-blur-sm z-10">
+                  <TableRow>
+                    <TableHead className="cursor-pointer" onClick={() => toggleSort('trading_symbol')}>
+                      <div className="flex items-center gap-1">Symbol <ArrowUpDown className="h-3 w-3" /></div>
+                    </TableHead>
+                    <TableHead className="cursor-pointer" onClick={() => toggleSort('sector')}>
+                      <div className="flex items-center gap-1">Sector <ArrowUpDown className="h-3 w-3" /></div>
+                    </TableHead>
+                    <TableHead className="text-right cursor-pointer" onClick={() => toggleSort('quantity')}>
+                      <div className="flex items-center justify-end gap-1">Qty <ArrowUpDown className="h-3 w-3" /></div>
+                    </TableHead>
+                    <TableHead className="text-right cursor-pointer" onClick={() => toggleSort('average_price')}>
+                      <div className="flex items-center justify-end gap-1">Cost Price <ArrowUpDown className="h-3 w-3" /></div>
+                    </TableHead>
+                    <TableHead className="text-right cursor-pointer" onClick={() => toggleSort('last_price')}>
+                      <div className="flex items-center justify-end gap-1">LTP <ArrowUpDown className="h-3 w-3" /></div>
+                    </TableHead>
+                    <TableHead className="text-right cursor-pointer" onClick={() => toggleSort('current_value')}>
+                      <div className="flex items-center justify-end gap-1">Current Value <ArrowUpDown className="h-3 w-3" /></div>
+                    </TableHead>
+                    <TableHead className="text-right cursor-pointer" onClick={() => toggleSort('pnl')}>
+                      <div className="flex items-center justify-end gap-1">Absolute P&L <ArrowUpDown className="h-3 w-3" /></div>
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {sortedHoldings.map((h, i) => (
+                    <TableRow key={i} className="hover:bg-slate-50/60 transition-colors">
+                      <TableCell className="font-bold text-slate-900">{h.trading_symbol}<span className="text-xxs text-slate-400 block font-normal">{h.exchange}</span></TableCell>
+                      <TableCell><Badge variant="outline" className="text-slate-600 bg-slate-50">{h.sector}</Badge></TableCell>
+                      <TableCell className="text-right font-medium font-mono">{h.quantity}</TableCell>
+                      <TableCell className="text-right font-mono">₹{h.average_price.toFixed(2)}</TableCell>
+                      <TableCell className="text-right font-semibold font-mono">₹{h.last_price.toFixed(2)}</TableCell>
+                      <TableCell className="text-right font-bold font-mono text-slate-800">₹{h.current_value.toFixed(2)}</TableCell>
+                      <TableCell className={`text-right font-bold font-mono ${h.pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                        {h.pnl >= 0 ? '+' : ''}₹{h.pnl.toFixed(2)}
+                        <span className="text-xxs block font-medium opacity-80">({h.pnl_percent.toFixed(2)}%)</span>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+
+            {/* FINANCIAL TOTALS MATRIX CARDS */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4 border-t pt-4 bg-slate-50/40 p-3 rounded-lg">
+              <div className="p-3 bg-white border rounded-lg shadow-2xs">
+                <span className="text-xxs font-bold tracking-wider text-slate-400 uppercase">Sum of Costs (Unit Base)</span>
+                <p className="text-lg font-bold font-mono text-slate-700 mt-0.5">₹{aggregatedTotals.sumCostPrice.toFixed(2)}</p>
+              </div>
+              <div className="p-3 bg-white border rounded-lg shadow-2xs">
+                <span className="text-xxs font-bold tracking-wider text-slate-400 uppercase">Sum of LTPs (Unit Base)</span>
+                <p className="text-lg font-bold font-mono text-slate-800 mt-0.5">₹{aggregatedTotals.sumLtp.toFixed(2)}</p>
+              </div>
+              <div className="p-3 bg-white border rounded-lg shadow-2xs">
+                <span className="text-xxs font-bold tracking-wider text-slate-400 uppercase">Absolute Net Valuation P&L</span>
+                <p className={`text-lg font-bold font-mono mt-0.5 ${portfolio.totalPnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                  ₹{portfolio.totalPnl.toFixed(2)}
+                </p>
+              </div>
+              <div className="p-3 bg-white border rounded-lg shadow-2xs">
+                <span className="text-xxs font-bold tracking-wider text-slate-400 uppercase">Gross Return Velocity</span>
+                <p className={`text-lg font-bold font-mono mt-0.5 ${portfolio.totalPnlPercent >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                  {portfolio.totalPnlPercent.toFixed(2)}%
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* NATIVE OAUTH FALLBACK */}
+      {needsAuth && !isLoadingStatus && (
+        <Card className="border-yellow-400/50 bg-yellow-50/10">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Key className="h-5 w-5 text-yellow-500" />OAuth Handshake Session Expired</CardTitle>
+            <CardDescription>Renew read access token privileges to sync active depository metrics.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button onClick={startOAuthFlow} className="w-full" size="lg"><ExternalLink className="mr-2 h-4 w-4" />Authorize Scoped Read Session</Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {portfolioError && (
+        <Card className="border-destructive/40 bg-destructive/5">
+          <CardContent className="pt-4 flex gap-3">
+            <AlertCircle className="h-5 w-5 text-destructive mt-0.5" />
+            <div>
+              <p className="text-sm font-semibold text-destructive">Upstream Handshake Evaluation Fault</p>
+              <p className="text-xs font-mono text-slate-600 mt-1 break-all">{portfolioError}</p>
+              <div className="flex gap-2 mt-3">
+                <Button variant="destructive" size="sm" onClick={startOAuthFlow}><RefreshCcw className="mr-2 h-3.5 w-3.5" />Re-authenticate Session</Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
