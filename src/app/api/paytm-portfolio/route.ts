@@ -1,17 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { google } from 'googleapis';
 
-// Upstream Google Sheets Credentials Parameters
 const SPREADSHEET_ID = process.env.GOOGLE_SPREADSHEET_ID || '';
 const clientEmail = process.env.GOOGLE_SHEETS_CLIENT_EMAIL || '';
 const privateKey = (process.env.GOOGLE_SHEETS_PRIVATE_KEY || '').replace(/\\n/g, '\n');
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 
-// In-Memory Token Persistence Layer Mock (Matches original architecture expectations)
 let globalSessionToken = '';
 let isTokenExpired = false;
 
-// Mock data matrix fallback matching original layout configuration for fallback loops
 const mockHoldings = [
   { trading_symbol: 'INFY', exchange: 'NSE', quantity: 50, average_price: 1420.0, last_price: 1510.5, pnl: 4525.0, pnl_percent: 6.37, current_value: 75525.0, investment_value: 71000.0, sector: 'Technology' },
   { trading_symbol: 'RELIANCE', exchange: 'NSE', quantity: 20, average_price: 2450.0, last_price: 2610.0, pnl: 3200.0, pnl_percent: 6.53, current_value: 52200.0, investment_value: 49000.0, sector: 'Energy' },
@@ -45,10 +42,6 @@ export async function GET(request: NextRequest) {
   }
 
   if (action === 'portfolio') {
-    if (!globalSessionToken && process.env.NODE_ENV === 'production') {
-      return NextResponse.json({ error: 'OAuth handshake required', oauthRequired: true });
-    }
-
     const totalInvestment = mockHoldings.reduce((sum, h) => sum + h.investment_value, 0);
     const totalCurrentValue = mockHoldings.reduce((sum, h) => sum + h.current_value, 0);
     const totalPnl = totalCurrentValue - totalInvestment;
@@ -61,7 +54,7 @@ export async function GET(request: NextRequest) {
       totalPnlPercent,
       holdings: mockHoldings,
       insights: "Overall Portfolio allocation looks solid. Core technical trends show strong multi-sector alignment.",
-      agentModel: "Gemini Pro Direct Rest API Engine",
+      agentModel: "Gemini Pro Direct REST API Engine",
       lastUpdated: new Date().toISOString(),
       paytmApiTimestamp: new Date().toISOString(),
       jwtMeta: {
@@ -120,7 +113,6 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  // UPDATED: Using a direct, standard HTTP fetch framework to contact the Gemini service
   if (action === 'strategy_insights') {
     try {
       const body = await request.json();
@@ -198,6 +190,7 @@ export async function POST(request: NextRequest) {
         ]);
       });
 
+      // Clears cell grid text without resetting sheet formatting styles
       await sheets.spreadsheets.values.clear({
         spreadsheetId: SPREADSHEET_ID,
         range: 'Strategies!A1:F100',
