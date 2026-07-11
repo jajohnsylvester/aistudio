@@ -5,6 +5,7 @@ import {
   callPaytmAPI, logDebug, type Holding,
 } from '@/lib/paytm-shared';
 
+// Modified cookie storage to track the specific Read token session
 const COOKIE_NAME = 'paytm_read_access_token';
 const CLOCK_TOLERANCE_SECONDS = 120;
 
@@ -32,6 +33,7 @@ function decodeJwtTimestamps(token: string) {
 
 /**
  * Check if a JWT token is expired based on its exp claim.
+ * Considers a 5-minute buffer to avoid edge-case failures.
  */
 function isJwtExpired(token: string): boolean {
   const meta = decodeJwtTimestamps(token);
@@ -43,6 +45,7 @@ function isJwtExpired(token: string): boolean {
 
 async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holdings: Holding[]; upstreamTime: string }> {
   try {
+    // Passing the scoped readAccessToken inside the request header pipeline
     const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, readAccessToken);
     const fallbackTime = new Date().toISOString();
     const rawHoldings = (holdingsRaw as { data?: { holdings?: unknown[] }; holdings?: unknown[] })?.data?.holdings ||
@@ -113,46 +116,6 @@ async function generateInsightsWithGemini(
   }
 }
 
-export async function POST(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const action = searchParams.get('action');
-  const cookieStore = await cookies();
-  const cookieToken = cookieStore.get(COOKIE_NAME);
-
-  // --- EXECUTE MCP TOOL VIA INTERACTIVE RUNNERS ---
-  if (action === 'execute_mcp_tool') {
-    if (!cookieToken?.value) {
-      return NextResponse.json({ error: 'Unauthorized: Session missing' }, { status: 401 });
-    }
-    try {
-      const body = await request.json();
-      const { toolName, arguments: toolArgs } = body;
-
-      logDebug('INFO', 'Executing MCP Tool wrapper invocation', { toolName, toolArgs });
-
-      // Find the corresponding local MCP definition array configurations
-      const targetedTool = MCP_TOOLS.find(t => t.name === toolName);
-      if (!targetedTool) {
-        return NextResponse.json({ error: `Tool ${toolName} not defined in schema metadata bounds.` }, { status: 404 });
-      }
-
-      // Map dynamic paths or call standard shared network wrapper directly 
-      // Emulated response proxy structure matching standard MCP server specifications:
-      const resultPayload = await targetedTool.handler(toolArgs || {}, cookieToken.value);
-
-      return NextResponse.json({
-        success: true,
-        toolResult: resultPayload,
-        timestamp: new Date().toISOString()
-      });
-    } catch (err: any) {
-      return NextResponse.json({ error: err.message || 'MCP execution pipeline failed' }, { status: 500 });
-    }
-  }
-
-  return NextResponse.json({ error: 'Method not supported' }, { status: 405 });
-}
-
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
@@ -171,6 +134,12 @@ export async function GET(request: NextRequest) {
       const tokenExpired = tokenValue ? isJwtExpired(tokenValue) : true;
       const jwtMeta = tokenValue ? decodeJwtTimestamps(tokenValue) : null;
 
+      logDebug('DEBUG', 'Status check', {
+        hasToken: !!tokenValue,
+        tokenExpired,
+        exp: jwtMeta?.expStr,
+      });
+
       const configuredRefreshInterval = process.env.PORTFOLIO_REFRESH_INTERVAL_SECONDS 
         ? parseInt(process.env.PORTFOLIO_REFRESH_INTERVAL_SECONDS, 10) 
         : 300;
@@ -185,17 +154,14 @@ export async function GET(request: NextRequest) {
         proxyConfigured: !!process.env.WEBSHARE_PROXY_URL,
         serverTimestamp: new Date().toISOString(),
         jwtMeta,
-        tools: MCP_TOOLS.map(t => ({
-          name: t.name,
-          description: t.description || 'No description provided.',
-          inputSchema: (t as any).inputSchema || {}
-        })),
+        tools: MCP_TOOLS.map(t => t.name),
         refreshIntervalSeconds: configuredRefreshInterval,
       });
     }
 
     // --- CLEAR TOKEN ---
     if (action === 'clear_token') {
+      logDebug('INFO', 'Clearing access token cookie');
       cookieStore.delete(COOKIE_NAME);
       return NextResponse.json({ success: true, message: 'Token cleared.' });
     }
@@ -215,6 +181,8 @@ export async function GET(request: NextRequest) {
       if (!requestToken) return NextResponse.json({ error: 'Missing request_token' }, { status: 400 });
       if (!apiKey || !apiSecret) return NextResponse.json({ error: 'API credentials not configured' }, { status: 500 });
 
+      logDebug('INFO', 'Exchanging request token for access tokens');
+
       const response = await fetch(`https://developer.paytmmoney.com${API_ROUTES.access_token}`, {
         method: 'POST',
         headers: {
@@ -226,32 +194,38 @@ export async function GET(request: NextRequest) {
 
       if (!response.ok) {
         const errorText = await response.text();
+        logDebug('ERROR', 'Token exchange rejected', { status: response.status, errorText });
         return NextResponse.json({ error: `Handshake rejected: ${errorText}` }, { status: 500 });
       }
 
       const tokenData = await response.json();
+      
+      // Specifically target read_access_token instead of regular execution access_token
       const readAccessToken = (tokenData as any).read_access_token;
 
       if (readAccessToken) {
+        logDebug('INFO', 'Read access token obtained successfully, setting cookie');
         cookieStore.set(COOKIE_NAME, readAccessToken, {
           httpOnly: true,
           secure: process.env.NODE_ENV === 'production',
           sameSite: 'strict',
-          maxAge: 86400 - CLOCK_TOLERANCE_SECONDS,
+          maxAge: 86400 - CLOCK_TOLERANCE_SECONDS, // Valid until midnight session window bounds
           path: '/',
         });
         return NextResponse.json({ success: true, hasAccessToken: true });
       }
-      return NextResponse.json({ error: 'No read-scoped access token payload returned' }, { status: 500 });
+      return NextResponse.json({ error: 'No read-scoped access token payload returned from broker' }, { status: 500 });
     }
 
     // --- PORTFOLIO ---
     if (action === 'portfolio' || !action) {
       if (!cookieToken || !cookieToken.value) {
+        logDebug('WARN', 'Portfolio requested but no read access token cookie found');
         return NextResponse.json({ error: 'No access token found.', oauthRequired: true }, { status: 401 });
       }
 
       if (isJwtExpired(cookieToken.value)) {
+        logDebug('WARN', 'Read access token is expired; clearing cookie and requesting re-auth');
         cookieStore.delete(COOKIE_NAME);
         return NextResponse.json({
           error: 'Access token expired. Please re-authenticate.',
@@ -260,6 +234,7 @@ export async function GET(request: NextRequest) {
         }, { status: 401 });
       }
 
+      logDebug('INFO', 'Fetching holdings with valid read token');
       const { holdings, upstreamTime } = await fetchHoldingsWithTime(cookieToken.value);
       const totalInvestment = holdings.reduce((s, h) => s + h.investment_value, 0);
       const totalCurrentValue = holdings.reduce((s, h) => s + h.current_value, 0);
@@ -269,6 +244,12 @@ export async function GET(request: NextRequest) {
       const { insights, agentModel } = await generateInsightsWithGemini(
         holdings, totalInvestment, totalCurrentValue, totalPnl, totalPnlPercent
       );
+
+      logDebug('INFO', 'Portfolio fetched successfully', {
+        holdingsCount: holdings.length,
+        totalInvestment,
+        totalCurrentValue,
+      });
 
       return NextResponse.json({
         holdings, totalInvestment, totalCurrentValue, totalPnl, totalPnlPercent,
@@ -282,6 +263,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ error: 'Invalid operation' }, { status: 400 });
   } catch (e: any) {
+    logDebug('ERROR', 'Unhandled error in paytm-portfolio route', { error: e.message, stack: e.stack });
     const isTokenError = e.message.includes('expired') || e.message.includes('token') || e.message.includes('401');
     if (isTokenError) cookieStore.delete(COOKIE_NAME);
     return NextResponse.json({ error: e.message, tokenExpired: isTokenError, oauthRequired: isTokenError }, { status: isTokenError ? 401 : 500 });
