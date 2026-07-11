@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown,
   AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
-  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer
+  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -19,6 +19,12 @@ interface JwtMetadata {
   rawExp: number | null;
   iatStr: string | null;
   expStr: string | null;
+}
+
+interface MCPToolInfo {
+  name: string;
+  description: string;
+  inputSchema?: any;
 }
 
 interface MCPStatus {
@@ -31,7 +37,7 @@ interface MCPStatus {
   proxyConfigured?: boolean;
   serverTimestamp?: string;
   jwtMeta?: JwtMetadata | null;
-  tools?: string[];
+  tools?: MCPToolInfo[];
   refreshIntervalSeconds?: number;
 }
 
@@ -85,10 +91,16 @@ function PaytmPortfolioContent() {
   const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(false);
   const [clientTime, setClientTime] = useState<string>('');
   
-  // Custom Automatic Refresh Configuration State (in Seconds)
+  // Custom Automatic Refresh Loop State
   const [refreshInterval, setRefreshInterval] = useState<number>(300); 
   const [isAutoRefreshEnabled, setIsAutoRefreshEnabled] = useState<boolean>(true);
   const [secondsUntilNextRefresh, setSecondsUntilNextRefresh] = useState<number>(300);
+
+  // MCP Interactive Runner Panel State
+  const [selectedTool, setSelectedTool] = useState<string>('');
+  const [toolArguments, setToolArguments] = useState<string>('{}');
+  const [mcpResult, setMcpResult] = useState<any>(null);
+  const [isExecutingTool, setIsExecutingTool] = useState<boolean>(false);
 
   const { toast } = useToast();
 
@@ -109,12 +121,15 @@ function PaytmPortfolioContent() {
         setRefreshInterval(statusData.refreshIntervalSeconds);
         setSecondsUntilNextRefresh(statusData.refreshIntervalSeconds);
       }
+      if (statusData.tools && statusData.tools.length > 0 && !selectedTool) {
+        setSelectedTool(statusData.tools[0].name);
+      }
     } catch {
       toast({ variant: 'destructive', title: 'Status check failed.' });
     } finally {
       setIsLoadingStatus(false);
     }
-  }, [toast]);
+  }, [selectedTool, toast]);
 
   const fetchPortfolio = useCallback(async () => {
     setIsLoadingPortfolio(true);
@@ -140,6 +155,34 @@ function PaytmPortfolioContent() {
       setIsLoadingPortfolio(false);
     }
   }, [refreshInterval]);
+
+  const runMcpToolCall = async () => {
+    if (!selectedTool) return;
+    setIsExecutingTool(true);
+    setMcpResult(null);
+    try {
+      let parsedArgs = {};
+      try {
+        parsedArgs = JSON.parse(toolArguments);
+      } catch {
+        throw new Error("Invalid Input JSON structure specified inside arguments payload box.");
+      }
+
+      const response = await fetch('/api/paytm-portfolio?action=execute_mcp_tool', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolName: selectedTool, arguments: parsedArgs })
+      });
+      const data = await response.json();
+      setMcpResult(data);
+      toast({ title: 'MCP Tool Run Complete', description: `Successfully completed call context for ${selectedTool}` });
+    } catch (err: any) {
+      setMcpResult({ error: err.message });
+      toast({ variant: 'destructive', title: 'MCP Call Failure', description: err.message });
+    } finally {
+      setIsExecutingTool(false);
+    }
+  };
 
   const startOAuthFlow = async () => {
     try {
@@ -190,7 +233,6 @@ function PaytmPortfolioContent() {
     }
   }, [status?.hasAccessToken, status?.tokenExpired, fetchPortfolio, requestToken]);
 
-  // --- AUTOMATIC REFRESH LOOP ENGINE ---
   useEffect(() => {
     if (!status?.hasAccessToken || status?.tokenExpired || !isAutoRefreshEnabled) return;
 
@@ -210,11 +252,7 @@ function PaytmPortfolioContent() {
   const handleIntervalChange = (seconds: number) => {
     setRefreshInterval(seconds);
     setSecondsUntilNextRefresh(seconds);
-    if (seconds === 0) {
-      setIsAutoRefreshEnabled(false);
-    } else {
-      setIsAutoRefreshEnabled(true);
-    }
+    setIsAutoRefreshEnabled(seconds !== 0);
   };
 
   const activeJwtMeta = portfolio?.jwtMeta || status?.jwtMeta;
@@ -297,6 +335,64 @@ function PaytmPortfolioContent() {
           </div>
         </CardContent>
       </Card>
+
+      {/* INTERACTIVE MCP TOOL DISCOVERY & RUNNER CONSOLE */}
+      {status?.hasAccessToken && !status?.tokenExpired && status.tools && status.tools.length > 0 && (
+        <Card className="border-blue-200">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-base text-blue-900">
+              <Bot className="h-4 w-4" /> Available Model Context Protocol (MCP) Tools
+            </CardTitle>
+            <CardDescription>Direct interface functionality discovery extracted from running server instance maps</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4 pt-2">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="md:col-span-1 space-y-2">
+                <label className="text-xs font-semibold text-slate-600 block">Select Target Function</label>
+                <select 
+                  className="w-full text-xs p-2 border rounded-md outline-none bg-white font-medium"
+                  value={selectedTool}
+                  onChange={(e) => setSelectedTool(e.target.value)}
+                >
+                  {status.tools.map((t, idx) => (
+                    <option key={idx} value={t.name}>{t.name}</option>
+                  ))}
+                </select>
+                <div className="p-2.5 bg-slate-50 border rounded-md text-xxs text-slate-500 italic mt-2">
+                  {status.tools.find(t => t.name === selectedTool)?.description}
+                </div>
+              </div>
+              
+              <div className="md:col-span-2 space-y-2">
+                <label className="text-xs font-semibold text-slate-600 block">Arguments Object payload (JSON)</label>
+                <textarea 
+                  className="w-full h-[85px] p-2 border rounded-md font-mono text-xs outline-none bg-white resize-none"
+                  value={toolArguments}
+                  onChange={(e) => setToolArguments(e.target.value)}
+                  placeholder='{"symbol": "INFY", "exchange": "NSE"}'
+                />
+              </div>
+            </div>
+
+            <Button size="sm" className="w-full bg-blue-600 hover:bg-blue-700" onClick={runMcpToolCall} disabled={isExecutingTool}>
+              {isExecutingTool ? <Loader2 className="animate-spin mr-2 h-3.5 w-3.5" /> : <Play className="mr-2 h-3.5 w-3.5" />} 
+              Execute Scoped Server Capability
+            </Button>
+
+            {mcpResult && (
+              <div className="mt-2 border rounded-md overflow-hidden text-xs font-mono">
+                <div className="bg-slate-800 text-slate-200 p-1.5 flex justify-between items-center text-xxs">
+                  <span>CONSOLE RESPONSE OUTPUT</span>
+                  <span className="opacity-60">{mcpResult.timestamp || 'Ready'}</span>
+                </div>
+                <ScrollArea className="h-[120px] bg-slate-950 p-2 text-green-400 overflow-x-auto break-words">
+                  <pre>{JSON.stringify(mcpResult, null, 2)}</pre>
+                </ScrollArea>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {status && (!status.apiKeyConfigured || !status.secretConfigured) && !isLoadingStatus && (
         <Card className="border-destructive/50">
