@@ -6,9 +6,10 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import {
   Loader2, RefreshCw, AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
-  RefreshCcw, Server, Bot, Clock, Laptop, Fingerprint, Timer, Play, ChevronDown, ChevronUp, ArrowUpDown
+  RefreshCcw, Server, Clock, Laptop, Fingerprint, Timer, Plus, Save, BrainCircuit, ArrowUpDown
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -51,7 +52,14 @@ interface PortfolioData {
   jwtMeta?: any;
 }
 
-// RESTORED: Status indicator matrix icon helper component
+interface Strategy {
+  id: string;
+  name: string;
+  symbols: string[];
+  insights?: string;
+  isInsightLoading?: boolean;
+}
+
 function StatusIndicator({ ok, label, subtext }: { ok: boolean | undefined; label: string; subtext: string }) {
   return (
     <div className="flex items-center gap-3">
@@ -95,17 +103,105 @@ function PaytmPortfolioContent() {
   const [isJwtExpanded, setIsJwtExpanded] = useState(true);
   const [isStatusMatrixExpanded, setIsStatusMatrixExpanded] = useState(true);
 
-  // MCP Execution Console States
-  const [selectedTool, setSelectedTool] = useState<string>('');
-  const [toolArguments, setToolArguments] = useState<string>('{}');
-  const [mcpResult, setMcpResult] = useState<any>(null);
-  const [isExecutingTool, setIsExecutingTool] = useState<boolean>(false);
+  // Strategy Orchestration Workspace States
+  const [strategies, setStrategies] = useState<Strategy[]>([]);
+  const [newStrategyName, setNewStrategyName] = useState('');
+  const [isSavingToGoogleSheets, setIsSavingToGoogleSheets] = useState(false);
+  const [symbolInputs, setSymbolInputs] = useState<{ [key: string]: string }>({});
 
   useEffect(() => {
     setClientTime(new Date().toLocaleString());
     const timer = setInterval(() => setClientTime(new Date().toLocaleString()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Hydrate custom portfolio allocations from localized persistence states on mount
+  useEffect(() => {
+    const savedStrategies = localStorage.getItem('paytm_portfolio_strategies');
+    if (savedStrategies) {
+      try { setStrategies(JSON.parse(savedStrategies)); } catch (e) { console.error("Parse failed", e); }
+    }
+  }, []);
+
+  const saveStrategiesLocal = (updatedStrategies: Strategy[]) => {
+    setStrategies(updatedStrategies);
+    localStorage.setItem('paytm_portfolio_strategies', JSON.stringify(updatedStrategies));
+  };
+
+  const handleAddStrategy = () => {
+    if (!newStrategyName.trim()) return;
+    const newStrategy: Strategy = {
+      id: Date.now().toString(),
+      name: newStrategyName.trim(),
+      symbols: [],
+    };
+    saveStrategiesLocal([...strategies, newStrategy]);
+    setNewStrategyName('');
+    toast({ title: 'Strategy Initialized', description: `Strategy "${newStrategy.name}" successfully setup.` });
+  };
+
+  const handleAddSymbolToStrategy = (strategyId: string) => {
+    const inputSymbol = symbolInputs[strategyId]?.trim().toUpperCase();
+    if (!inputSymbol) return;
+
+    const updated = strategies.map(strat => {
+      if (strat.id === strategyId) {
+        if (strat.symbols.includes(inputSymbol)) {
+          toast({ title: 'Duplicate Asset', description: `${inputSymbol} already exists within this strategy.` });
+          return strat;
+        }
+        return { ...strat, symbols: [...strat.symbols, inputSymbol] };
+      }
+      return strat;
+    });
+
+    saveStrategiesLocal(updated);
+    setSymbolInputs(prev => ({ ...prev, [strategyId]: '' }));
+    toast({ title: 'Asset Mapped', description: `Allocated ${inputSymbol} into strategy scope.` });
+  };
+
+  const handleRemoveSymbolFromStrategy = (strategyId: string, symbolToRemove: string) => {
+    const updated = strategies.map(strat => {
+      if (strat.id === strategyId) {
+        return { ...strat, symbols: strat.symbols.filter(s => s !== symbolToRemove) };
+      }
+      return strat;
+    });
+    saveStrategiesLocal(updated);
+  };
+
+  const handleFetchGeminiInsights = async (strategyId: string, strategyName: string, strategyHoldings: Holding[]) => {
+    setStrategies(prev => prev.map(s => s.id === strategyId ? { ...s, isInsightLoading: true } : s));
+    try {
+      const response = await fetch('/api/paytm-portfolio?action=strategy_insights', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategyName, holdings: strategyHoldings })
+      });
+      const data = await response.json();
+      setStrategies(prev => prev.map(s => s.id === strategyId ? { ...s, insights: data.insights || 'No generation returned.', isInsightLoading: false } : s));
+    } catch (err: any) {
+      toast({ variant: 'destructive', title: 'AI Generation Interrupted', description: err.message });
+      setStrategies(prev => prev.map(s => s.id === strategyId ? { ...s, isInsightLoading: false } : s));
+    }
+  };
+
+  const handleSaveToGoogleSheet = async () => {
+    setIsSavingToGoogleSheets(true);
+    try {
+      const response = await fetch('/api/paytm-portfolio?action=save_strategies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategies, portfolioHoldings: portfolio?.holdings || [] })
+      });
+      if (!response.ok) throw new Error('Google Spreadsheet update transaction rejected.');
+      toast({ title: 'Sheets Sync Complete', description: 'Strategies and aggregated valuation metrics published.' });
+    } catch (err: any) {
+      toast({ variant: 'destructive', title: 'Sheets Transaction Failure', description: err.message });
+    } finally {
+      setIsSavingToGoogleSheets(false);
+    }
+  };
 
   const checkStatus = useCallback(async () => {
     setIsLoadingStatus(true);
@@ -117,10 +213,6 @@ function PaytmPortfolioContent() {
       if (statusData.refreshIntervalSeconds) {
         setRefreshInterval(statusData.refreshIntervalSeconds);
         setSecondsUntilNextRefresh(statusData.refreshIntervalSeconds);
-      }
-      
-      if (statusData.tools && statusData.tools.length > 0) {
-        setSelectedTool(prev => prev || statusData.tools![0].name);
       }
     } catch {
       toast({ variant: 'destructive', title: 'Status check failed.' });
@@ -196,6 +288,7 @@ function PaytmPortfolioContent() {
     return () => clearInterval(countdownId);
   }, [status?.hasAccessToken, status?.tokenExpired, isAutoRefreshEnabled, refreshInterval, fetchPortfolio]);
 
+  const startOAuthFlow = () => { window.location.href = '/api/paytm-portfolio?action=login'; };
   const handleIntervalChange = (seconds: number) => {
     setRefreshInterval(seconds);
     setSecondsUntilNextRefresh(seconds);
@@ -229,30 +322,28 @@ function PaytmPortfolioContent() {
     }
     const sumCostPrice = portfolio.holdings.reduce((sum, h) => sum + h.average_price, 0);
     const sumLtp = portfolio.holdings.reduce((sum, h) => sum + h.last_price, 0);
-    return {
-      sumCostPrice,
-      sumLtp,
-      sumCalculatedPnl: sumLtp - sumCostPrice
-    };
+    return { sumCostPrice, sumLtp, sumCalculatedPnl: sumLtp - sumCostPrice };
   }, [portfolio?.holdings]);
 
-  const runMcpToolCall = async () => {
-    if (!selectedTool) return;
-    setIsExecutingTool(true);
-    setMcpResult(null);
-    try {
-      const response = await fetch('/api/paytm-portfolio?action=execute_mcp_tool', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ toolName: selectedTool, arguments: JSON.parse(toolArguments) })
-      });
-      setMcpResult(await response.json());
-    } catch (err: any) {
-      setMcpResult({ error: err.message });
-    } finally {
-      setIsExecutingTool(false);
-    }
-  };
+  // Derived Financial Computations for Categorized Strategy Holdings
+  const strategyFinancialsMaps = useMemo(() => {
+    if (!portfolio?.holdings) return {};
+    const maps: { [key: string]: { holdings: Holding[]; investment: number; current: number; pnl: number; pnlPercent: number; sumCostPrice: number; sumLtp: number } } = {};
+    
+    strategies.forEach(strategy => {
+      const matches = portfolio.holdings.filter(h => strategy.symbols.includes(h.trading_symbol.toUpperCase()));
+      const investment = matches.reduce((sum, h) => sum + h.investment_value, 0);
+      const current = matches.reduce((sum, h) => sum + h.current_value, 0);
+      const sumCostPrice = matches.reduce((sum, h) => sum + h.average_price, 0);
+      const sumLtp = matches.reduce((sum, h) => sum + h.last_price, 0);
+      const pnl = current - investment;
+      const pnlPercent = investment > 0 ? (pnl / investment) * 100 : 0;
+
+      maps[strategy.id] = { holdings: matches, investment, current, pnl, pnlPercent, sumCostPrice, sumLtp };
+    });
+
+    return maps;
+  }, [strategies, portfolio?.holdings]);
 
   const activeJwtMeta = portfolio?.jwtMeta || status?.jwtMeta;
   const needsAuth = status && status.apiKeyConfigured && status.secretConfigured && (!status.hasAccessToken || status.tokenExpired);
@@ -263,7 +354,7 @@ function PaytmPortfolioContent() {
       <div className="flex items-center justify-between flex-wrap gap-3 border-b pb-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-slate-900">Paytm Money Portfolio Terminal</h1>
-          <p className="text-muted-foreground text-sm mt-1">Debugging cryptographic token lifetime bounds</p>
+          <p className="text-muted-foreground text-sm mt-1">Debugging cryptographic token lifetime bounds and custom trading strategies</p>
         </div>
         <div className="flex items-center gap-2">
           {status?.hasAccessToken && !status?.tokenExpired && (
@@ -289,6 +380,116 @@ function PaytmPortfolioContent() {
         </div>
       </div>
 
+      {/* STRATEGY MANAGER MODULE */}
+      <Card className="border-slate-300">
+        <CardHeader>
+          <CardTitle className="text-lg font-bold flex items-center gap-2 text-slate-800">
+            Portfolio Structural Strategy Allocator
+          </CardTitle>
+          <CardDescription>
+            Categorize active depository holdings into specialized strategies and update your linked Google Sheet tracking document.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <Input 
+              placeholder="Enter unique Strategy Name (e.g., Growth Alpha)" 
+              value={newStrategyName} 
+              onChange={(e) => setNewStrategyName(e.target.value)}
+              className="max-w-md bg-white"
+            />
+            <Button onClick={handleAddStrategy} disabled={!newStrategyName.trim()} variant="default">
+              <Plus className="h-4 w-4 mr-1.5" /> Create Strategy
+            </Button>
+            <Button onClick={handleSaveToGoogleSheet} disabled={strategies.length === 0 || isSavingToGoogleSheets} variant="outline" className="ml-auto border-blue-600 text-blue-700 hover:bg-blue-50">
+              {isSavingToGoogleSheets ? <Loader2 className="h-4 w-4 animate-spin mr-1.5" /> : <Save className="h-4 w-4 mr-1.5" />}
+              Save Configuration to Sheets
+            </Button>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 mt-4">
+            {strategies.map((strategy) => {
+              const fin = strategyFinancialsMaps[strategy.id] || { holdings: [], investment: 0, current: 0, pnl: 0, pnlPercent: 0, sumCostPrice: 0, sumLtp: 0 };
+              return (
+                <div key={strategy.id} className="border rounded-xl p-4 bg-white shadow-2xs space-y-4">
+                  <div className="flex justify-between items-start border-b pb-2 flex-wrap gap-2">
+                    <div>
+                      <h3 className="font-bold text-base text-slate-900">{strategy.name}</h3>
+                      <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                        {strategy.symbols.map(sym => (
+                          <Badge key={sym} variant="secondary" className="pl-2 pr-1 py-0.5 font-mono text-xs flex items-center gap-1">
+                            {sym}
+                            <button onClick={() => handleRemoveSymbolFromStrategy(strategy.id, sym)} className="text-slate-400 hover:text-red-500 font-bold ml-1 text-xs">×</button>
+                          </Badge>
+                        ))}
+                        {strategy.symbols.length === 0 && <span className="text-xs text-muted-foreground italic">No assets mapped.</span>}
+                      </div>
+                    </div>
+                    
+                    <div className="flex items-center gap-2">
+                      <Input
+                        placeholder="Add Asset Symbol (e.g. RELIANCE)"
+                        value={symbolInputs[strategy.id] || ''}
+                        onChange={(e) => setSymbolInputs(prev => ({ ...prev, [strategy.id]: e.target.value }))}
+                        className="w-48 h-8 text-xs font-mono uppercase"
+                        onKeyDown={(e) => e.key === 'Enter' && handleAddSymbolToStrategy(strategy.id)}
+                      />
+                      <Button size="sm" variant="secondary" className="h-8" onClick={() => handleAddSymbolToStrategy(strategy.id)}>Add</Button>
+                      <Button 
+                        size="sm" 
+                        variant="outline" 
+                        className="h-8 border-purple-500 text-purple-700 hover:bg-purple-50"
+                        onClick={() => handleFetchGeminiInsights(strategy.id, strategy.name, fin.holdings)}
+                        disabled={fin.holdings.length === 0 || strategy.isInsightLoading}
+                      >
+                        {strategy.isInsightLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> : <BrainCircuit className="h-3.5 w-3.5 mr-1" />}
+                        Gemini Insights
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* FINANCIAL METRICS SUMMARY LAYER */}
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 bg-slate-50 p-3 rounded-lg border text-xs">
+                    <div>
+                      <span className="text-slate-400 block font-semibold uppercase text-xxs tracking-wider">Invested value</span>
+                      <p className="font-bold text-slate-800 font-mono">₹{fin.investment.toFixed(2)}</p>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block font-semibold uppercase text-xxs tracking-wider">Current value</span>
+                      <p className="font-bold text-slate-800 font-mono">₹{fin.current.toFixed(2)}</p>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block font-semibold uppercase text-xxs tracking-wider">Sum Cost Price</span>
+                      <p className="font-bold text-slate-700 font-mono">₹{fin.sumCostPrice.toFixed(2)}</p>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block font-semibold uppercase text-xxs tracking-wider">Sum LTP</span>
+                      <p className="font-bold text-slate-700 font-mono">₹{fin.sumLtp.toFixed(2)}</p>
+                    </div>
+                    <div className="col-span-2 md:col-span-1">
+                      <span className="text-slate-400 block font-semibold uppercase text-xxs tracking-wider">Net P&L Return</span>
+                      <p className={`font-bold font-mono ${fin.pnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                        {fin.pnl >= 0 ? '+' : ''}₹{fin.pnl.toFixed(2)} ({fin.pnlPercent.toFixed(2)}%)
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* MINI AI CONSOLE INSIGHTS */}
+                  {strategy.insights && (
+                    <div className="p-3 bg-purple-50/40 border border-purple-100 rounded-lg text-xs text-slate-700 leading-relaxed whitespace-pre-line font-medium">
+                      <div className="flex items-center gap-1 text-purple-900 font-bold mb-1">
+                        <Lightbulb className="h-3.5 w-3.5 text-purple-600" /> Strategy AI Directives
+                      </div>
+                      {strategy.insights}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </CardContent>
+      </Card>
+
       {/* COLLAPSIBLE 1: SYSTEM CLOCKS METRICS */}
       <Card>
         <CardHeader className="py-3 flex flex-row items-center justify-between cursor-pointer select-none" onClick={() => setIsClocksExpanded(!isClocksExpanded)}>
@@ -296,7 +497,6 @@ function PaytmPortfolioContent() {
             <Clock className="h-4 w-4 text-slate-500" />
             <CardTitle className="text-sm font-semibold">System Synchronization Latency Matrix</CardTitle>
           </div>
-          {isClocksExpanded ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
         </CardHeader>
         {isClocksExpanded && (
           <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
@@ -323,7 +523,6 @@ function PaytmPortfolioContent() {
             <Fingerprint className="h-4 w-4" />
             <CardTitle className="text-sm font-semibold">JWT Scoped Claims Cryptographic Inspector</CardTitle>
           </div>
-          {isJwtExpanded ? <ChevronUp className="h-4 w-4 text-purple-400" /> : <ChevronDown className="h-4 w-4 text-purple-400" />}
         </CardHeader>
         {isJwtExpanded && (
           <CardContent className="pt-2">
@@ -332,12 +531,10 @@ function PaytmPortfolioContent() {
                 <div className="p-3 bg-white border rounded-lg shadow-sm">
                   <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Issued At (iat)</span>
                   <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.iatStr ? new Date(activeJwtMeta.iatStr).toLocaleString() : 'N/A'}</p>
-                  <span className="text-xxs text-slate-400 block mt-0.5">Unix: {activeJwtMeta.rawIat}</span>
                 </div>
                 <div className="p-3 bg-white border rounded-lg shadow-sm">
                   <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Expires At (exp)</span>
                   <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.expStr ? new Date(activeJwtMeta.expStr).toLocaleString() : 'N/A'}</p>
-                  <span className="text-xxs text-slate-400 block mt-0.5">Unix: {activeJwtMeta.rawExp}</span>
                 </div>
               </div>
             ) : (
@@ -354,7 +551,6 @@ function PaytmPortfolioContent() {
             <Key className="h-4 w-4 text-slate-500" />
             <CardTitle className="text-sm font-semibold">Upstream Application Gateway Key Status Matrix</CardTitle>
           </div>
-          {isStatusMatrixExpanded ? <ChevronUp className="h-4 w-4 text-slate-400" /> : <ChevronDown className="h-4 w-4 text-slate-400" />}
         </CardHeader>
         {isStatusMatrixExpanded && (
           <CardContent className="pt-2">
@@ -388,37 +584,19 @@ function PaytmPortfolioContent() {
           <CardContent className="pt-6">
             <div className="flex justify-between items-center mb-4 flex-wrap gap-2">
               <h2 className="text-lg font-bold text-slate-800">Demat Depository Assets Layout Table</h2>
-              <div className="flex gap-2 text-xxs font-mono">
-                {portfolio.agentModel && <Badge variant="secondary">{portfolio.agentModel}</Badge>}
-                <Badge variant="outline">Sorted By: {sortField} ({sortDirection})</Badge>
-              </div>
             </div>
 
             <ScrollArea className="h-[380px] rounded-md border">
               <Table>
                 <TableHeader className="bg-slate-50/80 sticky top-0 backdrop-blur-sm z-10">
                   <TableRow>
-                    <TableHead className="cursor-pointer" onClick={() => toggleSort('trading_symbol')}>
-                      <div className="flex items-center gap-1">Symbol <ArrowUpDown className="h-3 w-3" /></div>
-                    </TableHead>
-                    <TableHead className="cursor-pointer" onClick={() => toggleSort('sector')}>
-                      <div className="flex items-center gap-1">Sector <ArrowUpDown className="h-3 w-3" /></div>
-                    </TableHead>
-                    <TableHead className="text-right cursor-pointer" onClick={() => toggleSort('quantity')}>
-                      <div className="flex items-center justify-end gap-1">Qty <ArrowUpDown className="h-3 w-3" /></div>
-                    </TableHead>
-                    <TableHead className="text-right cursor-pointer" onClick={() => toggleSort('average_price')}>
-                      <div className="flex items-center justify-end gap-1">Cost Price <ArrowUpDown className="h-3 w-3" /></div>
-                    </TableHead>
-                    <TableHead className="text-right cursor-pointer" onClick={() => toggleSort('last_price')}>
-                      <div className="flex items-center justify-end gap-1">LTP <ArrowUpDown className="h-3 w-3" /></div>
-                    </TableHead>
-                    <TableHead className="text-right cursor-pointer" onClick={() => toggleSort('current_value')}>
-                      <div className="flex items-center justify-end gap-1">Current Value <ArrowUpDown className="h-3 w-3" /></div>
-                    </TableHead>
-                    <TableHead className="text-right cursor-pointer" onClick={() => toggleSort('pnl')}>
-                      <div className="flex items-center justify-end gap-1">Absolute P&L <ArrowUpDown className="h-3 w-3" /></div>
-                    </TableHead>
+                    <TableHead className="cursor-pointer" onClick={() => toggleSort('trading_symbol')}>Symbol <ArrowUpDown className="h-3 w-3 inline ml-1" /></TableHead>
+                    <TableHead className="cursor-pointer" onClick={() => toggleSort('sector')}>Sector <ArrowUpDown className="h-3 w-3 inline ml-1" /></TableHead>
+                    <TableHead className="text-right">Qty</TableHead>
+                    <TableHead className="text-right">Cost Price</TableHead>
+                    <TableHead className="text-right">LTP</TableHead>
+                    <TableHead className="text-right">Current Value</TableHead>
+                    <TableHead className="text-right">Absolute P&L</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -443,15 +621,15 @@ function PaytmPortfolioContent() {
             {/* FINANCIAL TOTALS MATRIX CARDS */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4 border-t pt-4 bg-slate-50/40 p-3 rounded-lg">
               <div className="p-3 bg-white border rounded-lg shadow-2xs">
-                <span className="text-xxs font-bold tracking-wider text-slate-400 uppercase">Sum of Costs (Unit Base)</span>
+                <span className="text-xxs font-bold tracking-wider text-slate-400 uppercase">Sum of Costs</span>
                 <p className="text-lg font-bold font-mono text-slate-700 mt-0.5">₹{aggregatedTotals.sumCostPrice.toFixed(2)}</p>
               </div>
               <div className="p-3 bg-white border rounded-lg shadow-2xs">
-                <span className="text-xxs font-bold tracking-wider text-slate-400 uppercase">Sum of LTPs (Unit Base)</span>
+                <span className="text-xxs font-bold tracking-wider text-slate-400 uppercase">Sum of LTPs</span>
                 <p className="text-lg font-bold font-mono text-slate-800 mt-0.5">₹{aggregatedTotals.sumLtp.toFixed(2)}</p>
               </div>
               <div className="p-3 bg-white border rounded-lg shadow-2xs">
-                <span className="text-xxs font-bold tracking-wider text-slate-400 uppercase">Absolute Net Valuation P&L</span>
+                <span className="text-xxs font-bold tracking-wider text-slate-400 uppercase">Absolute P&L</span>
                 <p className={`text-lg font-bold font-mono mt-0.5 ${portfolio.totalPnl >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                   ₹{portfolio.totalPnl.toFixed(2)}
                 </p>
@@ -467,30 +645,14 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
-      {/* NATIVE OAUTH FALLBACK */}
+      {/* OAUTH AND ERROR CONSOLE FALLBACKS */}
       {needsAuth && !isLoadingStatus && (
         <Card className="border-yellow-400/50 bg-yellow-50/10">
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Key className="h-5 w-5 text-yellow-500" />OAuth Handshake Session Expired</CardTitle>
-            <CardDescription>Renew read access token privileges to sync active depository metrics.</CardDescription>
           </CardHeader>
           <CardContent>
             <Button onClick={startOAuthFlow} className="w-full" size="lg"><ExternalLink className="mr-2 h-4 w-4" />Authorize Scoped Read Session</Button>
-          </CardContent>
-        </Card>
-      )}
-
-      {portfolioError && (
-        <Card className="border-destructive/40 bg-destructive/5">
-          <CardContent className="pt-4 flex gap-3">
-            <AlertCircle className="h-5 w-5 text-destructive mt-0.5" />
-            <div>
-              <p className="text-sm font-semibold text-destructive">Upstream Handshake Evaluation Fault</p>
-              <p className="text-xs font-mono text-slate-600 mt-1 break-all">{portfolioError}</p>
-              <div className="flex gap-2 mt-3">
-                <Button variant="destructive" size="sm" onClick={startOAuthFlow}><RefreshCcw className="mr-2 h-3.5 w-3.5" />Re-authenticate Session</Button>
-              </div>
-            </div>
           </CardContent>
         </Card>
       )}
