@@ -8,9 +8,6 @@ import {
 const COOKIE_NAME = 'paytm_read_access_token';
 const CLOCK_TOLERANCE_SECONDS = 120;
 
-/**
- * Decode JWT claims (iat and exp) without external packages.
- */
 function decodeJwtTimestamps(token: string) {
   try {
     const parts = token.split('.');
@@ -30,9 +27,6 @@ function decodeJwtTimestamps(token: string) {
   }
 }
 
-/**
- * Check if a JWT token is expired based on its exp claim.
- */
 function isJwtExpired(token: string): boolean {
   const meta = decodeJwtTimestamps(token);
   if (!meta.rawExp) return true;
@@ -43,32 +37,52 @@ function isJwtExpired(token: string): boolean {
 
 async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holdings: Holding[]; upstreamTime: string }> {
   try {
+    console.log("=== [PAYTM API DEBUG] STARTING FETCH HOLDINGS CALL ===");
+    console.log(`[PAYTM API DEBUG] Using Scoped Read Token Snippet: ${readAccessToken.substring(0, 20)}...`);
+    
+    // Executing the core API call
     const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, readAccessToken);
+    
+    // CRITICAL LOGGERS: Printing exact raw response from the broker to your terminal
+    console.log("=== [PAYTM API DEBUG] RAW RESPONSE RECEIVED FROM BROKER ===");
+    console.log(JSON.stringify(holdingsRaw, null, 2));
+    console.log("==========================================================");
+
     const fallbackTime = new Date().toISOString();
     
-    // FIX 1: Robust structural normalization to handle direct arrays vs object wrappers
     let rawHoldings: unknown[] = [];
     if (Array.isArray(holdingsRaw)) {
+      console.log("[PAYTM API DEBUG] Detected structural type: Direct Root JSON Array");
       rawHoldings = holdingsRaw;
     } else if (holdingsRaw && typeof holdingsRaw === 'object') {
+      console.log("[PAYTM API DEBUG] Detected structural type: Object Wrapper");
       const anyRaw = holdingsRaw as Record<string, any>;
+      
+      console.log("[PAYTM API DEBUG] Available Object Keys:", Object.keys(anyRaw));
+      
       if (Array.isArray(anyRaw.data)) {
+        console.log("[PAYTM API DEBUG] Slicing array from: holdingsRaw.data");
         rawHoldings = anyRaw.data;
       } else if (anyRaw.data && Array.isArray(anyRaw.data.holdings)) {
+        console.log("[PAYTM API DEBUG] Slicing array from: holdingsRaw.data.holdings");
         rawHoldings = anyRaw.data.holdings;
       } else if (Array.isArray(anyRaw.holdings)) {
+        console.log("[PAYTM API DEBUG] Slicing array from: holdingsRaw.holdings");
         rawHoldings = anyRaw.holdings;
       }
     }
 
-    logDebug('DEBUG', 'Raw holdings payload parsed', { count: rawHoldings.length });
+    console.log(`[PAYTM API DEBUG] Final isolated holdings count for mapping loop: ${rawHoldings.length}`);
 
-    // FIX 2: Remap naming attributes to align exactly with Paytm's explicit documentation
-    const mappedHoldings: Holding[] = rawHoldings.map((raw) => {
+    if (rawHoldings.length > 0) {
+      console.log("[PAYTM API DEBUG] Sample item properties from index [0]:", JSON.stringify(rawHoldings[0], null, 2));
+    }
+
+    const mappedHoldings: Holding[] = rawHoldings.map((raw, index) => {
       const h = (raw || {}) as Record<string, unknown>;
       const quantity = parseFloat((h.quantity || h.qty) as string) || 0;
-      const averagePrice = parseFloat((h.cost_price || h.average_price || h.avg_price) as string) || 0; // cost_price is official documentation field
-      const lastPrice = parseFloat((h.last_traded_price || h.last_price || h.ltp) as string) || 0;  // last_traded_price is official documentation field
+      const averagePrice = parseFloat((h.cost_price || h.average_price || h.avg_price) as string) || 0;
+      const lastPrice = parseFloat((h.last_traded_price || h.last_price || h.ltp) as string) || 0;
       
       const investmentValue = quantity * averagePrice;
       const currentValue = quantity * lastPrice;
@@ -97,7 +111,7 @@ async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holding
       upstreamTime: (holdingsRaw as { responseDate?: string })?.responseDate || fallbackTime
     };
   } catch (error: any) {
-    logDebug('ERROR', 'fetchHoldingsWithTime failed', { error: error.message });
+    console.error("❌ [PAYTM API DEBUG] CRITICAL PIPELINE FAULT DETECTED:", error.message);
     throw new Error(`Upstream API evaluation exception: ${error.message}`);
   }
 }
