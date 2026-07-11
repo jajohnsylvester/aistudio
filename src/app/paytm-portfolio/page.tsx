@@ -51,6 +51,19 @@ interface PortfolioData {
   jwtMeta?: any;
 }
 
+// RESTORED: Status indicator matrix icon helper component
+function StatusIndicator({ ok, label, subtext }: { ok: boolean | undefined; label: string; subtext: string }) {
+  return (
+    <div className="flex items-center gap-3">
+      {ok ? <CheckCircle className="h-5 w-5 text-green-500 flex-shrink-0" /> : <AlertCircle className="h-5 w-5 text-destructive flex-shrink-0" />}
+      <div>
+        <p className="text-sm font-medium leading-none">{label}</p>
+        <p className={`text-xs mt-0.5 ${ok ? 'text-green-600' : 'text-destructive'}`}>{subtext}</p>
+      </div>
+    </div>
+  );
+}
+
 export default function PaytmPortfolioPage() {
   return <Suspense fallback={<div className="p-8 text-center"><Loader2 className="animate-spin h-8 w-8 mx-auto" /></div>}><PaytmPortfolioContent /></Suspense>;
 }
@@ -94,7 +107,6 @@ function PaytmPortfolioContent() {
     return () => clearInterval(timer);
   }, []);
 
-  // FIX: Decoupled selectedTool out of dependency sequence to eliminate client loop crashes
   const checkStatus = useCallback(async () => {
     setIsLoadingStatus(true);
     try {
