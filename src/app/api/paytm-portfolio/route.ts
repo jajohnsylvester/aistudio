@@ -38,47 +38,32 @@ function isJwtExpired(token: string): boolean {
 async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holdings: Holding[]; upstreamTime: string }> {
   try {
     console.log("=== [PAYTM API DEBUG] STARTING FETCH HOLDINGS CALL ===");
-    console.log(`[PAYTM API DEBUG] Using Scoped Read Token Snippet: ${readAccessToken.substring(0, 20)}...`);
-    
-    // Executing the core API call
     const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, readAccessToken);
     
-    // CRITICAL LOGGERS: Printing exact raw response from the broker to your terminal
-    console.log("=== [PAYTM API DEBUG] RAW RESPONSE RECEIVED FROM BROKER ===");
-    console.log(JSON.stringify(holdingsRaw, null, 2));
-    console.log("==========================================================");
-
     const fallbackTime = new Date().toISOString();
-    
     let rawHoldings: unknown[] = [];
+
     if (Array.isArray(holdingsRaw)) {
-      console.log("[PAYTM API DEBUG] Detected structural type: Direct Root JSON Array");
       rawHoldings = holdingsRaw;
     } else if (holdingsRaw && typeof holdingsRaw === 'object') {
-      console.log("[PAYTM API DEBUG] Detected structural type: Object Wrapper");
       const anyRaw = holdingsRaw as Record<string, any>;
       
-      console.log("[PAYTM API DEBUG] Available Object Keys:", Object.keys(anyRaw));
-      
-      if (Array.isArray(anyRaw.data)) {
-        console.log("[PAYTM API DEBUG] Slicing array from: holdingsRaw.data");
+      // FIX: Added extraction path for Paytm Money's data.results structure
+      if (anyRaw.data && Array.isArray(anyRaw.data.results)) {
+        console.log("[PAYTM API DEBUG] Successfully extracted array from: holdingsRaw.data.results");
+        rawHoldings = anyRaw.data.results;
+      } else if (Array.isArray(anyRaw.data)) {
         rawHoldings = anyRaw.data;
       } else if (anyRaw.data && Array.isArray(anyRaw.data.holdings)) {
-        console.log("[PAYTM API DEBUG] Slicing array from: holdingsRaw.data.holdings");
         rawHoldings = anyRaw.data.holdings;
       } else if (Array.isArray(anyRaw.holdings)) {
-        console.log("[PAYTM API DEBUG] Slicing array from: holdingsRaw.holdings");
         rawHoldings = anyRaw.holdings;
       }
     }
 
     console.log(`[PAYTM API DEBUG] Final isolated holdings count for mapping loop: ${rawHoldings.length}`);
 
-    if (rawHoldings.length > 0) {
-      console.log("[PAYTM API DEBUG] Sample item properties from index [0]:", JSON.stringify(rawHoldings[0], null, 2));
-    }
-
-    const mappedHoldings: Holding[] = rawHoldings.map((raw, index) => {
+    const mappedHoldings: Holding[] = rawHoldings.map((raw) => {
       const h = (raw || {}) as Record<string, unknown>;
       const quantity = parseFloat((h.quantity || h.qty) as string) || 0;
       const averagePrice = parseFloat((h.cost_price || h.average_price || h.avg_price) as string) || 0;
@@ -95,7 +80,7 @@ async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holding
 
       return {
         trading_symbol: (h.nse_symbol || h.bse_symbol || h.display_name || h.trading_symbol || 'Unknown') as string,
-        exchange: (h.exchange || (h.nse_symbol ? 'NSE' : 'BSE')) as string,
+        exchange: (h.exchange && h.exchange !== 'ALL') ? (h.exchange as string) : (h.nse_symbol ? 'NSE' : 'BSE'),
         quantity,
         average_price: averagePrice,
         last_price: lastPrice,
@@ -190,7 +175,6 @@ export async function GET(request: NextRequest) {
   const cookieToken = cookieStore.get(COOKIE_NAME);
 
   try {
-    // --- STATUS ---
     if (action === 'status') {
       const tokenValue = cookieToken?.value;
       const tokenExpired = tokenValue ? isJwtExpired(tokenValue) : true;
@@ -219,13 +203,11 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // --- CLEAR TOKEN ---
     if (action === 'clear_token') {
       cookieStore.delete(COOKIE_NAME);
       return NextResponse.json({ success: true, message: 'Token cleared.' });
     }
 
-    // --- LOGIN URL ---
     if (action === 'login_url') {
       if (!apiKey) return NextResponse.json({ error: 'PAYTM_MONEY_API_KEY not configured' }, { status: 400 });
       const state = searchParams.get('state') || Date.now().toString();
@@ -234,7 +216,6 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // --- EXCHANGE TOKEN ---
     if (action === 'exchange_token') {
       const requestToken = searchParams.get('request_token');
       if (!requestToken) return NextResponse.json({ error: 'Missing request_token' }, { status: 400 });
@@ -270,7 +251,6 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'No read-scoped access token payload returned' }, { status: 500 });
     }
 
-    // --- PORTFOLIO ---
     if (action === 'portfolio' || !action) {
       if (!cookieToken || !cookieToken.value) {
         return NextResponse.json({ error: 'No access token found.', oauthRequired: true }, { status: 401 });
