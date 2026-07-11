@@ -159,7 +159,7 @@ function PaytmPortfolioContent() {
       try {
         const response = await fetch(`/api/paytm-portfolio?action=exchange_token&request_token=${encodeURIComponent(requestToken)}`, { credentials: 'include' });
         if (!response.ok) throw new Error('Exchange failed');
-        toast({ title: 'Success', description: 'Token mapped successfully.' });
+        toast({ title: 'Success', description: 'Read-scoped access token mapped successfully.' });
         router.replace('/paytm-portfolio');
         checkStatus();
       } catch (err: any) {
@@ -292,7 +292,7 @@ function PaytmPortfolioContent() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatusIndicator ok={status?.apiKeyConfigured} label="API Key" subtext={status?.apiKeyConfigured ? 'Secured' : 'Missing'} />
             <StatusIndicator ok={status?.secretConfigured} label="API Secret" subtext={status?.secretConfigured ? 'Secured' : 'Missing'} />
-            <StatusIndicator ok={status?.hasAccessToken && !isTokenError} label="Session State" subtext={status?.hasAccessToken && !isTokenError ? 'Active Token' : 'OAuth Required'} />
+            <StatusIndicator ok={status?.hasAccessToken && !isTokenError} label="Session State" subtext={status?.hasAccessToken && !isTokenError ? 'Active Read Token' : 'OAuth Required'} />
             <StatusIndicator ok={!!portfolio} label="Data Pipeline" subtext={portfolio ? 'Synced' : 'Dormant'} />
           </div>
         </CardContent>
