@@ -9,11 +9,10 @@ import { Badge } from '@/components/ui/badge';
 import {
   Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown,
   AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
-  Server, Bot, Clock, Laptop, Fingerprint, Timer, Play, PieChart as PieIcon
+  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play, PieChart as ChartIcon
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
 
 interface JwtMetadata {
   rawIat: number | null;
@@ -52,14 +51,16 @@ interface Holding {
   pnl_percent: number;
   current_value: number;
   investment_value: number;
-  sector?: string;
+  sector: string;
 }
 
 interface SectorAllocation {
-  sector: string;
-  investment_value: number;
-  current_value: number;
+  sectorName: string;
+  investment: number;
+  current: number;
   pnl: number;
+  pnlPercent: number;
+  allocationPercent: number;
 }
 
 interface PortfolioData {
@@ -68,7 +69,7 @@ interface PortfolioData {
   totalPnl: number;
   totalPnlPercent: number;
   holdings: Holding[];
-  sectorAllocation: SectorAllocation[];
+  sectorAllocations: SectorAllocation[];
   insights: string;
   agentModel?: string;
   source?: string;
@@ -76,8 +77,6 @@ interface PortfolioData {
   paytmApiTimestamp?: string;
   jwtMeta?: JwtMetadata | null;
 }
-
-const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d', '#ffc658'];
 
 function StatusIndicator({ ok, label, subtext }: { ok: boolean | undefined; label: string; subtext: string }) {
   return (
@@ -113,6 +112,8 @@ function PaytmPortfolioContent() {
   const [isExecutingTool, setIsExecutingTool] = useState<boolean>(false);
 
   const { toast } = useToast();
+
+  const chartColors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#6366f1'];
 
   useEffect(() => {
     setClientTime(new Date().toLocaleString());
@@ -265,22 +266,30 @@ function PaytmPortfolioContent() {
     setIsAutoRefreshEnabled(seconds !== 0);
   };
 
+  // Helper function to build dynamic conic gradient string for pure CSS pie chart
+  const renderPieGradient = () => {
+    if (!portfolio || !portfolio.sectorAllocations) return '';
+    let currentPercentage = 0;
+    const gradientParts = portfolio.sectorAllocations.map((sector, index) => {
+      const color = chartColors[index % chartColors.length];
+      const nextPercentage = currentPercentage + sector.allocationPercent;
+      const part = `${color} ${currentPercentage.toFixed(2)}% ${nextPercentage.toFixed(2)}%`;
+      currentPercentage = nextPercentage;
+      return part;
+    });
+    return `conic-gradient(${gradientParts.join(', ')})`;
+  };
+
   const activeJwtMeta = portfolio?.jwtMeta || status?.jwtMeta;
   const isTokenError = portfolioError?.includes('expired') || portfolioError?.includes('token') || portfolioError?.includes('401');
   const needsAuth = status && status.apiKeyConfigured && status.secretConfigured && (!status.hasAccessToken || status.tokenExpired);
-
-  // Parse pie chart specific data based exactly on calculated current values
-  const pieChartData = portfolio?.sectorAllocation.map(item => ({
-    name: item.sector,
-    value: Math.max(0, item.current_value)
-  })) || [];
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Paytm Money Portfolio Terminal</h1>
-          <p className="text-muted-foreground text-sm mt-1">Real-time valuation accounting & asset parameters</p>
+          <p className="text-muted-foreground text-sm mt-1">Debugging cryptographic token lifetime bounds</p>
         </div>
         <div className="flex items-center gap-2">
           {status?.hasAccessToken && !status?.tokenExpired && (
@@ -318,86 +327,66 @@ function PaytmPortfolioContent() {
 
       {portfolio && (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <Card>
-            <CardHeader className="pb-2"><CardDescription className="text-xs font-medium">Total Investment</CardDescription></CardHeader>
-            <CardContent><p className="text-2xl font-bold tracking-tight">₹{portfolio.totalInvestment.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</p></CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2"><CardDescription className="text-xs font-medium">Current Value</CardDescription></CardHeader>
-            <CardContent><p className="text-2xl font-bold tracking-tight">₹{portfolio.totalCurrentValue.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</p></CardContent>
-          </Card>
-          <Card className={portfolio.totalPnl >= 0 ? 'bg-green-50/30' : 'bg-red-50/30'}>
-            <CardHeader className="pb-2"><CardDescription className="text-xs font-medium">Total Profit & Loss</CardDescription></CardHeader>
-            <CardContent className="flex items-center gap-2">
-              <p className={`text-2xl font-bold tracking-tight ${portfolio.totalPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                ₹{portfolio.totalPnl.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
-              </p>
-              {portfolio.totalPnl >= 0 ? <TrendingUp className="h-5 w-5 text-green-500" /> : <TrendingDown className="h-5 w-5 text-red-500" />}
+          <Card className="bg-slate-50/50">
+            <CardContent className="pt-4">
+              <p className="text-xs font-medium text-muted-foreground">Total Investment</p>
+              <p className="text-2xl font-bold mt-1 text-slate-900">₹{portfolio.totalInvestment.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
             </CardContent>
           </Card>
-          <Card>
-            <CardHeader className="pb-2"><CardDescription className="text-xs font-medium">Return Percentage</CardDescription></CardHeader>
-            <CardContent><p className={`text-2xl font-bold tracking-tight ${portfolio.totalPnlPercent >= 0 ? 'text-green-600' : 'text-red-600'}`}>{portfolio.totalPnlPercent.toFixed(2)}%</p></CardContent>
-          </Card>
-        </div>
-      )}
-
-      {portfolio && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <Card className="lg:col-span-1">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base"><PieIcon className="h-4 w-4" /> Sector Distribution</CardTitle>
-              <CardDescription>Visualizing asset exposure parameters dynamically</CardDescription>
-            </CardHeader>
-            <CardContent className="h-[280px] flex items-center justify-center">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={pieChartData} cx="50%" cy="45%" innerRadius={60} outerRadius={80} paddingAngle={4} dataKey="value">
-                    {pieChartData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip formatter={(value: any) => [`₹${Number(value).toFixed(2)}`, 'Current Value']} />
-                  <Legend verticalAlign="bottom" wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
-                </PieChart>
-              </ResponsiveContainer>
+          <Card className="bg-slate-50/50">
+            <CardContent className="pt-4">
+              <p className="text-xs font-medium text-muted-foreground">Current Value</p>
+              <p className="text-2xl font-bold mt-1 text-slate-900">₹{portfolio.totalCurrentValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
             </CardContent>
           </Card>
-
-          <Card className="lg:col-span-2">
-            <CardHeader>
-              <CardTitle className="text-base">Sector Analysis Breakdown</CardTitle>
-              <CardDescription>Aggregated metrics computed exactly from current holding response maps</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ScrollArea className="h-[240px]">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Sector</TableHead>
-                      <TableHead className="text-right">Invested</TableHead>
-                      <TableHead className="text-right">Current Value</TableHead>
-                      <TableHead className="text-right">Net P&L</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {portfolio.sectorAllocation.map((s, idx) => (
-                      <TableRow key={idx}>
-                        <TableCell className="font-medium">{s.sector}</TableCell>
-                        <TableCell className="text-right">₹{s.investment_value.toFixed(2)}</TableCell>
-                        <TableCell className="text-right">₹{s.current_value.toFixed(2)}</TableCell>
-                        <TableCell className={`text-right font-semibold ${s.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                          ₹{s.pnl.toFixed(2)}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </ScrollArea>
+          <Card className={portfolio.totalPnl >= 0 ? "bg-green-50/30 border-green-100" : "bg-red-50/30 border-red-100"}>
+            <CardContent className="pt-4">
+              <p className="text-xs font-medium text-muted-foreground">Total P&L</p>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className={`text-2xl font-bold ${portfolio.totalPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  ₹{portfolio.totalPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+              </div>
+            </CardContent>
+          </Card>
+          <Card className={portfolio.totalPnl >= 0 ? "bg-green-50/30 border-green-100" : "bg-red-50/30 border-red-100"}>
+            <CardContent className="pt-4">
+              <p className="text-xs font-medium text-muted-foreground">Returns %</p>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className={`text-2xl font-bold flex items-center gap-1 ${portfolio.totalPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  {portfolio.totalPnl >= 0 ? <TrendingUp className="h-5 w-5" /> : <TrendingDown className="h-5 w-5" />}
+                  {portfolio.totalPnlPercent.toFixed(2)}%
+                </span>
+              </div>
             </CardContent>
           </Card>
         </div>
       )}
+
+      <Card className="border-purple-200 bg-purple-50/10">
+        <CardHeader className="pb-2">
+          <CardTitle className="flex items-center gap-2 text-base text-purple-900"><Fingerprint className="h-4 w-4" />JWT Claims Inspector</CardTitle>
+          <CardDescription>Validating Issued At (iat) and Expiration (exp) time claims directly from token payload</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {activeJwtMeta ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
+              <div className="p-3 bg-white border rounded-lg shadow-sm">
+                <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Issued At (iat)</span>
+                <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.iatStr ? new Date(activeJwtMeta.iatStr).toLocaleString() : 'N/A'}</p>
+                <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawIat}</span>
+              </div>
+              <div className="p-3 bg-white border rounded-lg shadow-sm">
+                <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Expires At (exp)</span>
+                <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.expStr ? new Date(activeJwtMeta.expStr).toLocaleString() : 'N/A'}</p>
+                <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawExp}</span>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground py-2 italic">Authenticate or fetch portfolio metrics to read token payload properties.</p>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardContent className="pt-6">
@@ -467,14 +456,30 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
+      {status && (!status.apiKeyConfigured || !status.secretConfigured) && !isLoadingStatus && (
+        <Card className="border-destructive/50">
+          <CardHeader><CardTitle className="flex items-center gap-2 text-destructive"><AlertCircle className="h-5 w-5" />Setup Required</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm text-muted-foreground">Set the following environment variables:</p>
+            <div className="bg-muted rounded-lg p-3 font-mono text-xs space-y-1">
+              <p>PAYTM_MONEY_API_KEY=<span className="text-muted-foreground">your_api_key</span></p>
+              <p>PAYTM_MONEY_SECRET=<span className="text-muted-foreground">your_api_secret</span></p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {needsAuth && !isLoadingStatus && (
         <Card className="border-yellow-400/50">
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Key className="h-5 w-5 text-yellow-500" />OAuth Handshake Required</CardTitle>
-            <CardDescription>Connect verified credentials to start streaming historical holdings metrics.</CardDescription>
+            <CardDescription>Connect your verified credentials to start streaming historical holdings metrics.</CardDescription>
           </CardHeader>
           <CardContent>
             <Button onClick={startOAuthFlow} className="w-full" size="lg"><ExternalLink className="mr-2 h-4 w-4" />Authorize Paytm Money Session</Button>
+            <div className="mt-3 text-xxs text-muted-foreground bg-muted p-2 rounded font-mono break-all">
+              Callback URI: {typeof window !== 'undefined' ? window.location.origin : ''}/paytm-portfolio
+            </div>
           </CardContent>
         </Card>
       )}
@@ -496,43 +501,106 @@ function PaytmPortfolioContent() {
       )}
 
       {portfolio && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Individual Asset Positions</CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <ScrollArea className="h-[350px]">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Symbol</TableHead>
-                    <TableHead>Sector</TableHead>
-                    <TableHead className="text-right">Qty</TableHead>
-                    <TableHead className="text-right">Avg Price</TableHead>
-                    <TableHead className="text-right">LTP</TableHead>
-                    <TableHead className="text-right">Current Value</TableHead>
-                    <TableHead className="text-right">Net P&L</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {portfolio.holdings.map((h, i) => (
-                    <TableRow key={i}>
-                      <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
-                      <TableCell><Badge variant="outline" className="text-xxs">{h.sector || 'Unassigned'}</Badge></TableCell>
-                      <TableCell className="text-right">{h.quantity}</TableCell>
-                      <TableCell className="text-right">₹{h.average_price.toFixed(2)}</TableCell>
-                      <TableCell className="text-right">₹{h.last_price.toFixed(2)}</TableCell>
-                      <TableCell className="text-right">₹{(h.quantity * h.last_price).toFixed(2)}</TableCell>
-                      <TableCell className={`text-right font-medium ${(h.quantity * (h.last_price - h.average_price)) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                        {(((h.last_price - h.average_price) / h.average_price) * 100).toFixed(2)}%
-                      </TableCell>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <Card className="lg:col-span-2">
+            <CardHeader>
+              <CardTitle className="text-base font-semibold">Asset Holdings Detail</CardTitle>
+              <CardDescription>Live pricing and gains calculated from response array data mapping</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex gap-2 mb-4">
+                {portfolio.source && <Badge variant="outline">{portfolio.source}</Badge>}
+                {portfolio.agentModel && <Badge variant="secondary">{portfolio.agentModel}</Badge>}
+              </div>
+              
+              {portfolio.insights && (
+                <div className="p-3 bg-amber-50/50 border border-amber-200/60 rounded-lg mb-4 text-sm text-amber-900">
+                  <div className="flex items-center gap-1.5 font-semibold text-xs mb-1 text-amber-800"><Lightbulb className="h-3.5 w-3.5" /> AI Observations</div>
+                  <p>{portfolio.insights}</p>
+                </div>
+              )}
+
+              <ScrollArea className="h-[350px]">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Symbol</TableHead>
+                      <TableHead>Sector</TableHead>
+                      <TableHead className="text-right">Qty</TableHead>
+                      <TableHead className="text-right">Avg Price</TableHead>
+                      <TableHead className="text-right">LTP</TableHead>
+                      <TableHead className="text-right">Total P&L</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </ScrollArea>
-          </CardContent>
-        </Card>
+                  </TableHeader>
+                  <TableBody>
+                    {portfolio.holdings.map((h, i) => (
+                      <TableRow key={i}>
+                        <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
+                        <TableCell><Badge variant="outline" className="text-xxs">{h.sector}</Badge></TableCell>
+                        <TableCell className="text-right font-mono text-xs">{h.quantity}</TableCell>
+                        <TableCell className="text-right font-mono text-xs">₹{h.average_price.toFixed(2)}</TableCell>
+                        <TableCell className="text-right font-mono text-xs font-medium">₹{h.last_price.toFixed(2)}</TableCell>
+                        <TableCell className={`text-right font-mono text-xs font-semibold ${h.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          ₹{h.pnl.toFixed(2)} ({h.pnl_percent.toFixed(2)}%)
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+            </CardContent>
+          </Card>
+
+          <Card className="lg:col-span-1">
+            <CardHeader>
+              <CardTitle className="text-base font-semibold flex items-center gap-2">
+                <ChartIcon className="h-4 w-4 text-blue-600" /> Sector Diversification Matrix
+              </CardTitle>
+              <CardDescription>Proportional exposure computed from real asset sector objects</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {portfolio.sectorAllocations && portfolio.sectorAllocations.length > 0 ? (
+                <>
+                  <div className="flex justify-center py-4">
+                    <div 
+                      className="w-44 h-44 rounded-full shadow-inner relative flex items-center justify-center transition-all border border-slate-100" 
+                      style={{ backgroundImage: renderPieGradient() }}
+                    >
+                      <div className="w-28 h-28 bg-white rounded-full flex flex-col items-center justify-center shadow-md">
+                        <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Sectors</span>
+                        <span className="text-lg font-bold text-slate-800">{portfolio.sectorAllocations.length}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    {portfolio.sectorAllocations.map((sector, idx) => {
+                      const color = chartColors[idx % chartColors.length];
+                      return (
+                        <div key={idx} className="border rounded-md p-2.5 bg-slate-50/40 text-xs">
+                          <div className="flex items-center justify-between mb-1.5">
+                            <div className="flex items-center gap-2">
+                              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+                              <span className="font-semibold text-slate-800 truncate max-w-[140px]">{sector.sectorName}</span>
+                            </div>
+                            <span className="font-mono font-bold text-slate-600 bg-white border rounded px-1">{sector.allocationPercent.toFixed(1)}%</span>
+                          </div>
+                          
+                          <div className="grid grid-cols-2 gap-2 text-xxs text-muted-foreground mt-1 pt-1 border-t border-dashed">
+                            <div>Current: <b className="text-slate-700 font-mono text-xs block">₹{sector.current.toFixed(0)}</b></div>
+                            <div className="text-right">P&L: <b className={`text-xs font-mono block ${sector.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>₹{sector.pnl.toFixed(0)}</b></div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <div className="text-center py-8 text-xs text-muted-foreground italic">No sector fields returned in this tracking instance window.</div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
       )}
     </div>
   );
