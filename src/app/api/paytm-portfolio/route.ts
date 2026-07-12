@@ -1,110 +1,294 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
+import {
+  PAYTM_LOGIN_URL, API_ROUTES, MCP_TOOLS,
+  callPaytmAPI, logDebug, type Holding,
+} from '@/lib/paytm-shared';
 
-// Mock database/session store for demonstration purposes matching the UI snapshot
-let sessionToken = "valid_crypto_token_payload";
-let tokenExpirationTime = new Date(Date.now() + 12 * 60 * 60 * 1000); // 12 hours from now
+const COOKIE_NAME = 'paytm_read_access_token';
+const CLOCK_TOLERANCE_SECONDS = 120;
 
-export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const action = searchParams.get('action');
+function decodeJwtTimestamps(token: string) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return { iatStr: null, expStr: null, rawIat: null, rawExp: null };
 
-  const serverTimestamp = new Date().toISOString();
-  
-  // Standardized JWT Metadata matching the snapshot metrics
-  const jwtMeta = {
-    rawIat: 1783873761,
-    rawExp: 1783960161,
-    iatStr: new Date(1783873761 * 1000).toISOString(),
-    expStr: new Date(1783960161 * 1000).toISOString(),
-  };
+    const payloadJson = Buffer.from(parts[1], 'base64').toString('utf-8');
+    const payload = JSON.parse(payloadJson);
 
-  if (action === 'status') {
-    return NextResponse.json({
-      connected: true,
-      hasAccessToken: !!sessionToken,
-      tokenExpired: false,
-      apiKeyConfigured: true,
-      secretConfigured: true,
-      serverTimestamp,
-      refreshIntervalSeconds: 300,
-      jwtMeta,
-      tools: [
-        {
-          name: 'fetch_portfolio_summary',
-          description: 'Returns overall performance breakdown.',
-        },
-        {
-          name: 'get_asset_allocations',
-          description: 'Retrieves categorical distributions for holdings.',
-        }
-      ]
+    return {
+      rawIat: payload.iat || null,
+      rawExp: payload.exp || null,
+      iatStr: payload.iat ? new Date(payload.iat * 1000).toISOString() : null,
+      expStr: payload.exp ? new Date(payload.exp * 1000).toISOString() : null,
+    };
+  } catch {
+    return { iatStr: null, expStr: null, rawIat: null, rawExp: null };
+  }
+}
+
+function isJwtExpired(token: string): boolean {
+  const meta = decodeJwtTimestamps(token);
+  if (!meta.rawExp) return true;
+  const expiryMs = meta.rawExp * 1000;
+  const bufferMs = 5 * 60 * 1000;
+  return Date.now() >= (expiryMs - bufferMs);
+}
+
+async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holdings: Holding[]; upstreamTime: string }> {
+  try {
+    console.log("=== [PAYTM API DEBUG] STARTING FETCH HOLDINGS CALL ===");
+    const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, readAccessToken);
+    
+    const fallbackTime = new Date().toISOString();
+    let rawHoldings: unknown[] = [];
+
+    if (Array.isArray(holdingsRaw)) {
+      rawHoldings = holdingsRaw;
+    } else if (holdingsRaw && typeof holdingsRaw === 'object') {
+      const anyRaw = holdingsRaw as Record<string, any>;
+      
+      // FIX: Added extraction path for Paytm Money's data.results structure
+      if (anyRaw.data && Array.isArray(anyRaw.data.results)) {
+        console.log("[PAYTM API DEBUG] Successfully extracted array from: holdingsRaw.data.results");
+        rawHoldings = anyRaw.data.results;
+      } else if (Array.isArray(anyRaw.data)) {
+        rawHoldings = anyRaw.data;
+      } else if (anyRaw.data && Array.isArray(anyRaw.data.holdings)) {
+        rawHoldings = anyRaw.data.holdings;
+      } else if (Array.isArray(anyRaw.holdings)) {
+        rawHoldings = anyRaw.holdings;
+      }
+    }
+
+    console.log(`[PAYTM API DEBUG] Final isolated holdings count for mapping loop: ${rawHoldings.length}`);
+
+    const mappedHoldings: Holding[] = rawHoldings.map((raw) => {
+      const h = (raw || {}) as Record<string, unknown>;
+      const quantity = parseFloat((h.quantity || h.qty) as string) || 0;
+      const averagePrice = parseFloat((h.cost_price || h.average_price || h.avg_price) as string) || 0;
+      const lastPrice = parseFloat((h.last_traded_price || h.last_price || h.ltp) as string) || 0;
+      
+      const investmentValue = quantity * averagePrice;
+      const currentValue = quantity * lastPrice;
+      const calculatedPnl = currentValue - investmentValue;
+      
+      const pnl = typeof h.pnl !== 'undefined' ? parseFloat(h.pnl as string) : calculatedPnl;
+      const pnlPercent = typeof h.pnl_percent !== 'undefined' 
+        ? parseFloat(h.pnl_percent as string) 
+        : (investmentValue > 0 ? (calculatedPnl / investmentValue) * 100 : 0);
+
+      return {
+        trading_symbol: (h.nse_symbol || h.bse_symbol || h.display_name || h.trading_symbol || 'Unknown') as string,
+        exchange: (h.exchange && h.exchange !== 'ALL') ? (h.exchange as string) : (h.nse_symbol ? 'NSE' : 'BSE'),
+        quantity,
+        average_price: averagePrice,
+        last_price: lastPrice,
+        pnl,
+        pnl_percent: pnlPercent,
+        current_value: currentValue,
+        investment_value: investmentValue,
+      };
     });
+
+    return {
+      holdings: mappedHoldings,
+      upstreamTime: (holdingsRaw as { responseDate?: string })?.responseDate || fallbackTime
+    };
+  } catch (error: any) {
+    console.error("❌ [PAYTM API DEBUG] CRITICAL PIPELINE FAULT DETECTED:", error.message);
+    throw new Error(`Upstream API evaluation exception: ${error.message}`);
   }
+}
 
-  if (action === 'portfolio') {
-    // Upstream data containing mapped sector data from the Paytm Money API
-    const holdings = [
-      { trading_symbol: 'INFY', sector: 'Technology', quantity: 50, average_price: 1420.00, last_price: 1510.50, exchange: 'NSE' },
-      { trading_symbol: 'RELIANCE', sector: 'Energy & Oil', quantity: 20, average_price: 2350.00, last_price: 2420.00, exchange: 'NSE' },
-      { trading_symbol: 'HDFCBANK', sector: 'Financial Services', quantity: 35, average_price: 1550.00, last_price: 1610.20, exchange: 'NSE' },
-      { trading_symbol: 'TCS', sector: 'Technology', quantity: 15, average_price: 1200.00, last_price: 1450.00, exchange: 'NSE' },
-      { trading_symbol: 'ICICIBANK', sector: 'Financial Services', quantity: 40, average_price: 850.00, last_price: 930.00, exchange: 'NSE' },
-    ].map(item => {
-      const investment_value = item.quantity * item.average_price;
-      const current_value = item.quantity * item.last_price;
-      const pnl = current_value - investment_value;
-      const pnl_percent = investment_value > 0 ? (pnl / investment_value) * 100 : 0;
-      return { ...item, investment_value, current_value, pnl, pnl_percent };
-    });
+async function generateInsightsWithGemini(
+  holdings: Holding[],
+  totalInvestment: number,
+  totalCurrentValue: number,
+  totalPnl: number,
+  totalPnlPercent: number
+): Promise<{ insights: string; agentModel: string }> {
+  const geminiKey = process.env.GEMINI_API_KEY;
+  if (!geminiKey) return { insights: 'GEMINI_API_KEY not configured.', agentModel: 'none' };
+  if (holdings.length === 0) return { insights: 'No holdings records to analyze.', agentModel: 'gemini-2.5-flash' };
 
-    const totalInvestment = holdings.reduce((acc, curr) => acc + curr.investment_value, 0);
-    const totalCurrentValue = holdings.reduce((acc, curr) => acc + curr.current_value, 0);
-    const totalPnl = totalCurrentValue - totalInvestment;
-    const totalPnlPercent = totalInvestment > 0 ? (totalPnl / totalInvestment) * 100 : 0;
+  const prompt = `Analyze this portfolio brief: Investment ₹${totalInvestment}, Value ₹${totalCurrentValue}. Provide 3 short diagnostic observations.`;
 
-    return NextResponse.json({
-      totalInvestment,
-      totalCurrentValue,
-      totalPnl,
-      totalPnlPercent,
-      holdings,
-      insights: 'Portfolio performing optimally. Technology and Financial fields demonstrate strong relative gains.',
-      agentModel: 'Gemini 2.5 Pro',
-      source: 'Paytm Money Production Engine',
-      lastUpdated: serverTimestamp,
-      paytmApiTimestamp: new Date(Date.now() - 22000).toISOString(), // slightly delayed payload marker
-      jwtMeta
-    });
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+      }
+    );
+    const data = await response.json();
+    const insights = (data as any)?.candidates?.[0]?.content?.parts?.[0]?.text || 'AI insights unavailable.';
+    return { insights, agentModel: 'gemini-2.5-flash' };
+  } catch {
+    return { insights: 'Unable to parse AI insights.', agentModel: 'none' };
   }
-
-  if (action === 'clear_token') {
-    sessionToken = "";
-    return NextResponse.json({ success: true });
-  }
-
-  if (action === 'login_url') {
-    return NextResponse.json({ login_url: '/paytm-portfolio?request_token=mock_handshake_token' });
-  }
-
-  return NextResponse.json({ error: 'Invalid terminal action requested' }, { status: 400 });
 }
 
 export async function POST(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const action = searchParams.get('action');
+  const cookieStore = await cookies();
+  const cookieToken = cookieStore.get(COOKIE_NAME);
 
   if (action === 'execute_mcp_tool') {
-    const body = await request.json();
-    return NextResponse.json({
-      status: 'success',
-      toolExecuted: body.toolName,
-      timestamp: new Date().toLocaleTimeString(),
-      result: {
-        message: "Functional execution state synchronized over Model Context Protocol mapping.",
-        payloadArgsPassed: body.arguments
+    if (!cookieToken?.value) {
+      return NextResponse.json({ error: 'Unauthorized: Session missing' }, { status: 401 });
+    }
+    try {
+      const body = await request.json();
+      const { toolName, arguments: toolArgs } = body;
+
+      const targetedTool = MCP_TOOLS.find(t => t.name === toolName);
+      if (!targetedTool) {
+        return NextResponse.json({ error: `Tool ${toolName} not defined in schema metadata bounds.` }, { status: 404 });
       }
-    });
+
+      const resultPayload = await targetedTool.handler(toolArgs || {}, cookieToken.value);
+
+      return NextResponse.json({
+        success: true,
+        toolResult: resultPayload,
+        timestamp: new Date().toISOString()
+      });
+    } catch (err: any) {
+      return NextResponse.json({ error: err.message || 'MCP execution pipeline failed' }, { status: 500 });
+    }
   }
 
-  return NextResponse.json({ error: 'Method not supported' }, { status: 400 });
+  return NextResponse.json({ error: 'Method not supported' }, { status: 405 });
+}
+
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
+  const action = searchParams.get('action');
+  const apiKey = process.env.PAYTM_MONEY_API_KEY;
+  const apiSecret = process.env.PAYTM_MONEY_SECRET;
+
+  const cookieStore = await cookies();
+  const cookieToken = cookieStore.get(COOKIE_NAME);
+
+  try {
+    if (action === 'status') {
+      const tokenValue = cookieToken?.value;
+      const tokenExpired = tokenValue ? isJwtExpired(tokenValue) : true;
+      const jwtMeta = tokenValue ? decodeJwtTimestamps(tokenValue) : null;
+
+      const configuredRefreshInterval = process.env.PORTFOLIO_REFRESH_INTERVAL_SECONDS 
+        ? parseInt(process.env.PORTFOLIO_REFRESH_INTERVAL_SECONDS, 10) 
+        : 300;
+
+      return NextResponse.json({
+        connected: !!(apiKey && apiSecret),
+        hasAccessToken: !!tokenValue,
+        tokenExpired,
+        apiKeyConfigured: !!apiKey,
+        secretConfigured: !!apiSecret,
+        geminiKeyConfigured: !!process.env.GEMINI_API_KEY,
+        proxyConfigured: !!process.env.WEBSHARE_PROXY_URL,
+        serverTimestamp: new Date().toISOString(),
+        jwtMeta,
+        tools: MCP_TOOLS.map(t => ({
+          name: t.name,
+          description: t.description || 'No description provided.',
+          inputSchema: (t as any).inputSchema || {}
+        })),
+        refreshIntervalSeconds: configuredRefreshInterval,
+      });
+    }
+
+    if (action === 'clear_token') {
+      cookieStore.delete(COOKIE_NAME);
+      return NextResponse.json({ success: true, message: 'Token cleared.' });
+    }
+
+    if (action === 'login_url') {
+      if (!apiKey) return NextResponse.json({ error: 'PAYTM_MONEY_API_KEY not configured' }, { status: 400 });
+      const state = searchParams.get('state') || Date.now().toString();
+      return NextResponse.json({
+        login_url: `${PAYTM_LOGIN_URL}?apiKey=${apiKey}&state=${state}`
+      });
+    }
+
+    if (action === 'exchange_token') {
+      const requestToken = searchParams.get('request_token');
+      if (!requestToken) return NextResponse.json({ error: 'Missing request_token' }, { status: 400 });
+      if (!apiKey || !apiSecret) return NextResponse.json({ error: 'API credentials not configured' }, { status: 500 });
+
+      const response = await fetch(`https://developer.paytmmoney.com${API_ROUTES.access_token}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'openapi-client-src': 'sdk',
+        },
+        body: JSON.stringify({ api_key: apiKey, api_secret_key: apiSecret, request_token: requestToken }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        return NextResponse.json({ error: `Handshake rejected: ${errorText}` }, { status: 500 });
+      }
+
+      const tokenData = await response.json();
+      const readAccessToken = (tokenData as any).read_access_token;
+
+      if (readAccessToken) {
+        cookieStore.set(COOKIE_NAME, readAccessToken, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'strict',
+          maxAge: 86400 - CLOCK_TOLERANCE_SECONDS,
+          path: '/',
+        });
+        return NextResponse.json({ success: true, hasAccessToken: true });
+      }
+      return NextResponse.json({ error: 'No read-scoped access token payload returned' }, { status: 500 });
+    }
+
+    if (action === 'portfolio' || !action) {
+      if (!cookieToken || !cookieToken.value) {
+        return NextResponse.json({ error: 'No access token found.', oauthRequired: true }, { status: 401 });
+      }
+
+      if (isJwtExpired(cookieToken.value)) {
+        cookieStore.delete(COOKIE_NAME);
+        return NextResponse.json({
+          error: 'Access token expired. Please re-authenticate.',
+          tokenExpired: true,
+          oauthRequired: true,
+        }, { status: 401 });
+      }
+
+      const { holdings, upstreamTime } = await fetchHoldingsWithTime(cookieToken.value);
+      const totalInvestment = holdings.reduce((s, h) => s + h.investment_value, 0);
+      const totalCurrentValue = holdings.reduce((s, h) => s + h.current_value, 0);
+      const totalPnl = totalCurrentValue - totalInvestment;
+      const totalPnlPercent = totalInvestment > 0 ? (totalPnl / totalInvestment) * 100 : 0;
+
+      const { insights, agentModel } = await generateInsightsWithGemini(
+        holdings, totalInvestment, totalCurrentValue, totalPnl, totalPnlPercent
+      );
+
+      return NextResponse.json({
+        holdings, totalInvestment, totalCurrentValue, totalPnl, totalPnlPercent,
+        insights, agentModel,
+        lastUpdated: new Date().toISOString(),
+        paytmApiTimestamp: upstreamTime,
+        jwtMeta: decodeJwtTimestamps(cookieToken.value),
+        source: 'Paytm Money MCP Scoped Server',
+      });
+    }
+
+    return NextResponse.json({ error: 'Invalid operation' }, { status: 400 });
+  } catch (e: any) {
+    const isTokenError = e.message.includes('expired') || e.message.includes('token') || e.message.includes('401');
+    if (isTokenError) cookieStore.delete(COOKIE_NAME);
+    return NextResponse.json({ error: e.message, tokenExpired: isTokenError, oauthRequired: isTokenError }, { status: isTokenError ? 401 : 500 });
+  }
 }
