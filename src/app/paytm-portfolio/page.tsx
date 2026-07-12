@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown,
   AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
-  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play
+  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play, PieChart
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -51,6 +51,15 @@ interface Holding {
   pnl_percent: number;
   current_value: number;
   investment_value: number;
+  sector: string;
+}
+
+interface SectorBreakdownEntry {
+  sector: string;
+  currentValue: number;
+  investmentValue: number;
+  pnl: number;
+  percent: number;
 }
 
 interface PortfolioData {
@@ -65,6 +74,55 @@ interface PortfolioData {
   lastUpdated: string;
   paytmApiTimestamp?: string;
   jwtMeta?: JwtMetadata | null;
+  sectorBreakdown?: SectorBreakdownEntry[];
+}
+
+const SECTOR_COLORS = ['#3B82F6', '#F59E0B', '#10B981', '#8B5CF6', '#EF4444', '#06B6D4', '#EC4899', '#84CC16'];
+
+function formatINR(value: number): string {
+  return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function SectorDiversificationChart({ data }: { data: SectorBreakdownEntry[] }) {
+  const size = 180;
+  const radius = 70;
+  const strokeWidth = 26;
+  const circumference = 2 * Math.PI * radius;
+  let cumulativePercent = 0;
+
+  return (
+    <div className="flex flex-col items-center">
+      <div className="relative" style={{ width: size, height: size }}>
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90">
+          <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="#F1F5F9" strokeWidth={strokeWidth} />
+          {data.map((entry, idx) => {
+            const dash = (entry.percent / 100) * circumference;
+            const gap = circumference - dash;
+            const offset = -((cumulativePercent / 100) * circumference);
+            cumulativePercent += entry.percent;
+            return (
+              <circle
+                key={entry.sector}
+                cx={size / 2}
+                cy={size / 2}
+                r={radius}
+                fill="none"
+                stroke={SECTOR_COLORS[idx % SECTOR_COLORS.length]}
+                strokeWidth={strokeWidth}
+                strokeDasharray={`${dash} ${gap}`}
+                strokeDashoffset={offset}
+                strokeLinecap="butt"
+              />
+            );
+          })}
+        </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <span className="text-xs font-semibold text-slate-500 tracking-wide">SECTORS</span>
+          <span className="text-2xl font-bold text-slate-800">{data.length}</span>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function StatusIndicator({ ok, label, subtext }: { ok: boolean | undefined; label: string; subtext: string }) {
@@ -298,6 +356,40 @@ function PaytmPortfolioContent() {
         <Card><CardContent className="pt-4 flex items-center gap-3"><Clock className="h-5 w-5 text-emerald-600" /><div><p className="text-xs text-muted-foreground font-medium">Paytm Response Time</p><p className="text-sm font-bold text-emerald-900 tabular-nums">{portfolio?.paytmApiTimestamp ? new Date(portfolio.paytmApiTimestamp).toLocaleString() : 'No Connection'}</p></div></CardContent></Card>
       </div>
 
+      {portfolio && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <Card>
+            <CardContent className="pt-4">
+              <p className="text-xs text-muted-foreground font-medium">Total Investment</p>
+              <p className="text-xl font-bold mt-1 tabular-nums">{formatINR(portfolio.totalInvestment)}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="pt-4">
+              <p className="text-xs text-muted-foreground font-medium">Current Value</p>
+              <p className="text-xl font-bold mt-1 tabular-nums">{formatINR(portfolio.totalCurrentValue)}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="pt-4">
+              <p className="text-xs text-muted-foreground font-medium">Total P&L</p>
+              <p className={`text-xl font-bold mt-1 tabular-nums ${portfolio.totalPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                {formatINR(portfolio.totalPnl)}
+              </p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="pt-4">
+              <p className="text-xs text-muted-foreground font-medium">Returns %</p>
+              <p className={`text-xl font-bold mt-1 tabular-nums flex items-center gap-1.5 ${portfolio.totalPnlPercent >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                {portfolio.totalPnlPercent >= 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
+                {portfolio.totalPnlPercent.toFixed(2)}%
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
       <Card className="border-purple-200 bg-purple-50/10">
         <CardHeader className="pb-2">
           <CardTitle className="flex items-center gap-2 text-base text-purple-900"><Fingerprint className="h-4 w-4" />JWT Claims Inspector</CardTitle>
@@ -436,37 +528,90 @@ function PaytmPortfolioContent() {
       )}
 
       {portfolio && (
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex gap-2 mb-4">
-              {portfolio.source && <Badge variant="outline">{portfolio.source}</Badge>}
-              {portfolio.agentModel && <Badge variant="secondary">{portfolio.agentModel}</Badge>}
-            </div>
-            
-            {portfolio.insights && (
-              <div className="p-3 bg-amber-50/50 border border-amber-200/60 rounded-lg mb-4 text-sm text-amber-900">
-                <div className="flex items-center gap-1.5 font-semibold text-xs mb-1 text-amber-800"><Lightbulb className="h-3.5 w-3.5" /> AI Observations</div>
-                <p>{portfolio.insights}</p>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <Card className="lg:col-span-2">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">Asset Holdings Detail</CardTitle>
+              <CardDescription>Live pricing and gains calculated from response array mapping</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex gap-2 mb-4">
+                {portfolio.source && <Badge variant="outline">{portfolio.source}</Badge>}
+                {portfolio.agentModel && <Badge variant="secondary">{portfolio.agentModel}</Badge>}
               </div>
-            )}
 
-            <ScrollArea className="h-[350px]">
-              <Table>
-                <TableHeader><TableRow><TableHead>Symbol</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">LTP</TableHead><TableHead className="text-right">P&L</TableHead></TableRow></TableHeader>
-                <TableBody>
-                  {portfolio.holdings.map((h, i) => (
-                    <TableRow key={i}>
-                      <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
-                      <TableCell className="text-right">{h.quantity}</TableCell>
-                      <TableCell className="text-right">₹{h.last_price.toFixed(2)}</TableCell>
-                      <TableCell className={`text-right ${h.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>{h.pnl_percent.toFixed(2)}%</TableCell>
+              {portfolio.insights && (
+                <div className="p-3 bg-amber-50/50 border border-amber-200/60 rounded-lg mb-4 text-sm text-amber-900">
+                  <div className="flex items-center gap-1.5 font-semibold text-xs mb-1 text-amber-800"><Lightbulb className="h-3.5 w-3.5" /> AI Observations</div>
+                  <p>{portfolio.insights}</p>
+                </div>
+              )}
+
+              <ScrollArea className="h-[350px]">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Symbol</TableHead>
+                      <TableHead>Sector</TableHead>
+                      <TableHead className="text-right">Qty</TableHead>
+                      <TableHead className="text-right">Avg Price</TableHead>
+                      <TableHead className="text-right">LTP</TableHead>
+                      <TableHead className="text-right">Total P&L</TableHead>
                     </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {portfolio.holdings.map((h, i) => (
+                      <TableRow key={i}>
+                        <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
+                        <TableCell><Badge variant="outline" className="font-normal">{h.sector}</Badge></TableCell>
+                        <TableCell className="text-right">{h.quantity}</TableCell>
+                        <TableCell className="text-right">₹{h.average_price.toFixed(2)}</TableCell>
+                        <TableCell className="text-right">₹{h.last_price.toFixed(2)}</TableCell>
+                        <TableCell className={`text-right ${h.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          {formatINR(h.pnl)} ({h.pnl_percent.toFixed(2)}%)
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+            </CardContent>
+          </Card>
+
+          {portfolio.sectorBreakdown && portfolio.sectorBreakdown.length > 0 && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-base"><PieChart className="h-4 w-4" />Sector Diversification Matrix</CardTitle>
+                <CardDescription>Proportional exposure computed from real asset sector objects</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <SectorDiversificationChart data={portfolio.sectorBreakdown} />
+                <div className="mt-4 space-y-3">
+                  {portfolio.sectorBreakdown.map((s, idx) => (
+                    <div key={s.sector} className="flex items-start justify-between gap-2 text-sm">
+                      <div className="flex items-start gap-2">
+                        <span
+                          className="mt-1.5 h-2 w-2 rounded-full flex-shrink-0"
+                          style={{ backgroundColor: SECTOR_COLORS[idx % SECTOR_COLORS.length] }}
+                        />
+                        <div>
+                          <p className="font-medium leading-none">{s.sector}</p>
+                          <p className="text-xxs text-muted-foreground mt-1">Current:</p>
+                          <p className="text-xs font-semibold tabular-nums">{formatINR(s.currentValue)}</p>
+                        </div>
+                      </div>
+                      <div className="text-right flex-shrink-0">
+                        <Badge variant="secondary" className="font-mono">{s.percent.toFixed(2)}%</Badge>
+                        <p className="text-xxs text-muted-foreground mt-1">P&L:</p>
+                        <p className={`text-xs font-semibold tabular-nums ${s.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>{formatINR(s.pnl)}</p>
+                      </div>
+                    </div>
                   ))}
-                </TableBody>
-              </Table>
-            </ScrollArea>
-          </CardContent>
-        </Card>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </div>
       )}
     </div>
   );
