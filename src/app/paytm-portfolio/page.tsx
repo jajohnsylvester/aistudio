@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown,
   AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
-  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play, PieChart as ChartIcon
+  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -51,16 +51,6 @@ interface Holding {
   pnl_percent: number;
   current_value: number;
   investment_value: number;
-  sector: string;
-}
-
-interface SectorAllocation {
-  sectorName: string;
-  investment: number;
-  current: number;
-  pnl: number;
-  pnlPercent: number;
-  allocationPercent: number;
 }
 
 interface PortfolioData {
@@ -69,7 +59,6 @@ interface PortfolioData {
   totalPnl: number;
   totalPnlPercent: number;
   holdings: Holding[];
-  sectorAllocations: SectorAllocation[];
   insights: string;
   agentModel?: string;
   source?: string;
@@ -112,8 +101,6 @@ function PaytmPortfolioContent() {
   const [isExecutingTool, setIsExecutingTool] = useState<boolean>(false);
 
   const { toast } = useToast();
-
-  const chartColors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#6366f1'];
 
   useEffect(() => {
     setClientTime(new Date().toLocaleString());
@@ -266,20 +253,6 @@ function PaytmPortfolioContent() {
     setIsAutoRefreshEnabled(seconds !== 0);
   };
 
-  // Helper function to build dynamic conic gradient string for pure CSS pie chart
-  const renderPieGradient = () => {
-    if (!portfolio || !portfolio.sectorAllocations) return '';
-    let currentPercentage = 0;
-    const gradientParts = portfolio.sectorAllocations.map((sector, index) => {
-      const color = chartColors[index % chartColors.length];
-      const nextPercentage = currentPercentage + sector.allocationPercent;
-      const part = `${color} ${currentPercentage.toFixed(2)}% ${nextPercentage.toFixed(2)}%`;
-      currentPercentage = nextPercentage;
-      return part;
-    });
-    return `conic-gradient(${gradientParts.join(', ')})`;
-  };
-
   const activeJwtMeta = portfolio?.jwtMeta || status?.jwtMeta;
   const isTokenError = portfolioError?.includes('expired') || portfolioError?.includes('token') || portfolioError?.includes('401');
   const needsAuth = status && status.apiKeyConfigured && status.secretConfigured && (!status.hasAccessToken || status.tokenExpired);
@@ -324,44 +297,6 @@ function PaytmPortfolioContent() {
         <Card><CardContent className="pt-4 flex items-center gap-3"><Server className="h-5 w-5 text-purple-500" /><div><p className="text-xs text-muted-foreground font-medium">App Server Time</p><p className="text-sm font-semibold tabular-nums">{status?.serverTimestamp ? new Date(status.serverTimestamp).toLocaleString() : 'Loading...'}</p></div></CardContent></Card>
         <Card><CardContent className="pt-4 flex items-center gap-3"><Clock className="h-5 w-5 text-emerald-600" /><div><p className="text-xs text-muted-foreground font-medium">Paytm Response Time</p><p className="text-sm font-bold text-emerald-900 tabular-nums">{portfolio?.paytmApiTimestamp ? new Date(portfolio.paytmApiTimestamp).toLocaleString() : 'No Connection'}</p></div></CardContent></Card>
       </div>
-
-      {portfolio && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <Card className="bg-slate-50/50">
-            <CardContent className="pt-4">
-              <p className="text-xs font-medium text-muted-foreground">Total Investment</p>
-              <p className="text-2xl font-bold mt-1 text-slate-900">₹{portfolio.totalInvestment.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-            </CardContent>
-          </Card>
-          <Card className="bg-slate-50/50">
-            <CardContent className="pt-4">
-              <p className="text-xs font-medium text-muted-foreground">Current Value</p>
-              <p className="text-2xl font-bold mt-1 text-slate-900">₹{portfolio.totalCurrentValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-            </CardContent>
-          </Card>
-          <Card className={portfolio.totalPnl >= 0 ? "bg-green-50/30 border-green-100" : "bg-red-50/30 border-red-100"}>
-            <CardContent className="pt-4">
-              <p className="text-xs font-medium text-muted-foreground">Total P&L</p>
-              <div className="flex items-baseline gap-2 mt-1">
-                <span className={`text-2xl font-bold ${portfolio.totalPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  ₹{portfolio.totalPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
-              </div>
-            </CardContent>
-          </Card>
-          <Card className={portfolio.totalPnl >= 0 ? "bg-green-50/30 border-green-100" : "bg-red-50/30 border-red-100"}>
-            <CardContent className="pt-4">
-              <p className="text-xs font-medium text-muted-foreground">Returns %</p>
-              <div className="flex items-baseline gap-2 mt-1">
-                <span className={`text-2xl font-bold flex items-center gap-1 ${portfolio.totalPnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  {portfolio.totalPnl >= 0 ? <TrendingUp className="h-5 w-5" /> : <TrendingDown className="h-5 w-5" />}
-                  {portfolio.totalPnlPercent.toFixed(2)}%
-                </span>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
 
       <Card className="border-purple-200 bg-purple-50/10">
         <CardHeader className="pb-2">
@@ -501,106 +436,37 @@ function PaytmPortfolioContent() {
       )}
 
       {portfolio && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <Card className="lg:col-span-2">
-            <CardHeader>
-              <CardTitle className="text-base font-semibold">Asset Holdings Detail</CardTitle>
-              <CardDescription>Live pricing and gains calculated from response array data mapping</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex gap-2 mb-4">
-                {portfolio.source && <Badge variant="outline">{portfolio.source}</Badge>}
-                {portfolio.agentModel && <Badge variant="secondary">{portfolio.agentModel}</Badge>}
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex gap-2 mb-4">
+              {portfolio.source && <Badge variant="outline">{portfolio.source}</Badge>}
+              {portfolio.agentModel && <Badge variant="secondary">{portfolio.agentModel}</Badge>}
+            </div>
+            
+            {portfolio.insights && (
+              <div className="p-3 bg-amber-50/50 border border-amber-200/60 rounded-lg mb-4 text-sm text-amber-900">
+                <div className="flex items-center gap-1.5 font-semibold text-xs mb-1 text-amber-800"><Lightbulb className="h-3.5 w-3.5" /> AI Observations</div>
+                <p>{portfolio.insights}</p>
               </div>
-              
-              {portfolio.insights && (
-                <div className="p-3 bg-amber-50/50 border border-amber-200/60 rounded-lg mb-4 text-sm text-amber-900">
-                  <div className="flex items-center gap-1.5 font-semibold text-xs mb-1 text-amber-800"><Lightbulb className="h-3.5 w-3.5" /> AI Observations</div>
-                  <p>{portfolio.insights}</p>
-                </div>
-              )}
+            )}
 
-              <ScrollArea className="h-[350px]">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Symbol</TableHead>
-                      <TableHead>Sector</TableHead>
-                      <TableHead className="text-right">Qty</TableHead>
-                      <TableHead className="text-right">Avg Price</TableHead>
-                      <TableHead className="text-right">LTP</TableHead>
-                      <TableHead className="text-right">Total P&L</TableHead>
+            <ScrollArea className="h-[350px]">
+              <Table>
+                <TableHeader><TableRow><TableHead>Symbol</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">LTP</TableHead><TableHead className="text-right">P&L</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {portfolio.holdings.map((h, i) => (
+                    <TableRow key={i}>
+                      <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
+                      <TableCell className="text-right">{h.quantity}</TableCell>
+                      <TableCell className="text-right">₹{h.last_price.toFixed(2)}</TableCell>
+                      <TableCell className={`text-right ${h.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>{h.pnl_percent.toFixed(2)}%</TableCell>
                     </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {portfolio.holdings.map((h, i) => (
-                      <TableRow key={i}>
-                        <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
-                        <TableCell><Badge variant="outline" className="text-xxs">{h.sector}</Badge></TableCell>
-                        <TableCell className="text-right font-mono text-xs">{h.quantity}</TableCell>
-                        <TableCell className="text-right font-mono text-xs">₹{h.average_price.toFixed(2)}</TableCell>
-                        <TableCell className="text-right font-mono text-xs font-medium">₹{h.last_price.toFixed(2)}</TableCell>
-                        <TableCell className={`text-right font-mono text-xs font-semibold ${h.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                          ₹{h.pnl.toFixed(2)} ({h.pnl_percent.toFixed(2)}%)
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </ScrollArea>
-            </CardContent>
-          </Card>
-
-          <Card className="lg:col-span-1">
-            <CardHeader>
-              <CardTitle className="text-base font-semibold flex items-center gap-2">
-                <ChartIcon className="h-4 w-4 text-blue-600" /> Sector Diversification Matrix
-              </CardTitle>
-              <CardDescription>Proportional exposure computed from real asset sector objects</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              {portfolio.sectorAllocations && portfolio.sectorAllocations.length > 0 ? (
-                <>
-                  <div className="flex justify-center py-4">
-                    <div 
-                      className="w-44 h-44 rounded-full shadow-inner relative flex items-center justify-center transition-all border border-slate-100" 
-                      style={{ backgroundImage: renderPieGradient() }}
-                    >
-                      <div className="w-28 h-28 bg-white rounded-full flex flex-col items-center justify-center shadow-md">
-                        <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Sectors</span>
-                        <span className="text-lg font-bold text-slate-800">{portfolio.sectorAllocations.length}</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    {portfolio.sectorAllocations.map((sector, idx) => {
-                      const color = chartColors[idx % chartColors.length];
-                      return (
-                        <div key={idx} className="border rounded-md p-2.5 bg-slate-50/40 text-xs">
-                          <div className="flex items-center justify-between mb-1.5">
-                            <div className="flex items-center gap-2">
-                              <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
-                              <span className="font-semibold text-slate-800 truncate max-w-[140px]">{sector.sectorName}</span>
-                            </div>
-                            <span className="font-mono font-bold text-slate-600 bg-white border rounded px-1">{sector.allocationPercent.toFixed(1)}%</span>
-                          </div>
-                          
-                          <div className="grid grid-cols-2 gap-2 text-xxs text-muted-foreground mt-1 pt-1 border-t border-dashed">
-                            <div>Current: <b className="text-slate-700 font-mono text-xs block">₹{sector.current.toFixed(0)}</b></div>
-                            <div className="text-right">P&L: <b className={`text-xs font-mono block ${sector.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>₹{sector.pnl.toFixed(0)}</b></div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
-              ) : (
-                <div className="text-center py-8 text-xs text-muted-foreground italic">No sector fields returned in this tracking instance window.</div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
+                  ))}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+          </CardContent>
+        </Card>
       )}
     </div>
   );
