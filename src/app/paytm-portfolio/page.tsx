@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
   Loader2, RefreshCw, AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
-  RefreshCcw, Server, Bot, Clock, Laptop, Fingerprint, Timer, Play, ChevronDown, ChevronUp, ArrowUpDown
+  RefreshCcw, Server, Clock, Laptop, Fingerprint, Timer, ChevronDown, ChevronUp, ArrowUpDown
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -51,7 +51,6 @@ interface PortfolioData {
   jwtMeta?: any;
 }
 
-// RESTORED: Status indicator matrix icon helper component
 function StatusIndicator({ ok, label, subtext }: { ok: boolean | undefined; label: string; subtext: string }) {
   return (
     <div className="flex items-center gap-3">
@@ -65,7 +64,11 @@ function StatusIndicator({ ok, label, subtext }: { ok: boolean | undefined; labe
 }
 
 export default function PaytmPortfolioPage() {
-  return <Suspense fallback={<div className="p-8 text-center"><Loader2 className="animate-spin h-8 w-8 mx-auto" /></div>}><PaytmPortfolioContent /></Suspense>;
+  return (
+    <Suspense fallback={<div className="p-8 text-center"><Loader2 className="animate-spin h-8 w-8 mx-auto" /></div>}>
+      <PaytmPortfolioContent />
+    </Suspense>
+  );
 }
 
 function PaytmPortfolioContent() {
@@ -106,6 +109,11 @@ function PaytmPortfolioContent() {
     const timer = setInterval(() => setClientTime(new Date().toLocaleString()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // FIXED: Added missing OAuth Flow redirector logic
+  const startOAuthFlow = () => {
+    window.location.href = '/api/paytm-portfolio?action=login';
+  };
 
   const checkStatus = useCallback(async () => {
     setIsLoadingStatus(true);
@@ -235,24 +243,6 @@ function PaytmPortfolioContent() {
       sumCalculatedPnl: sumLtp - sumCostPrice
     };
   }, [portfolio?.holdings]);
-
-  const runMcpToolCall = async () => {
-    if (!selectedTool) return;
-    setIsExecutingTool(true);
-    setMcpResult(null);
-    try {
-      const response = await fetch('/api/paytm-portfolio?action=execute_mcp_tool', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ toolName: selectedTool, arguments: JSON.parse(toolArguments) })
-      });
-      setMcpResult(await response.json());
-    } catch (err: any) {
-      setMcpResult({ error: err.message });
-    } finally {
-      setIsExecutingTool(false);
-    }
-  };
 
   const activeJwtMeta = portfolio?.jwtMeta || status?.jwtMeta;
   const needsAuth = status && status.apiKeyConfigured && status.secretConfigured && (!status.hasAccessToken || status.tokenExpired);
