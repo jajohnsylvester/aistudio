@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown,
   AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
-  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play
+  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play, PieChart
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -51,6 +51,7 @@ interface Holding {
   pnl_percent: number;
   current_value: number;
   investment_value: number;
+  sector?: string; // Added for categorization capability
 }
 
 interface PortfolioData {
@@ -65,6 +66,26 @@ interface PortfolioData {
   lastUpdated: string;
   paytmApiTimestamp?: string;
   jwtMeta?: JwtMetadata | null;
+}
+
+interface SectorSummary {
+  sector: string;
+  investment_value: number;
+  current_value: number;
+  pnl: number;
+  pnl_percent: number;
+}
+
+// Helper to assign mock/real sectors if the API response doesn't natively supply them
+function getSectorForSymbol(symbol: string): string {
+  const sym = symbol.toUpperCase();
+  if (sym.includes('RELIANCE') || sym.includes('ONGC') || sym.includes('BPCL')) return 'Energy & Power';
+  if (sym.includes('TCS') || sym.includes('INFY') || sym.includes('WIPRO') || sym.includes('HCL')) return 'Information Technology';
+  if (sym.includes('HDFC') || sym.includes('SBIN') || sym.includes('ICICI') || sym.includes('AXIS')) return 'Banking & Financials';
+  if (sym.includes('TATAMOTORS') || sym.includes('MARUTI') || sym.includes('M&M')) return 'Automobile';
+  if (sym.includes('ITC') || sym.includes('HUL') || sym.includes('NESTLE')) return 'FMCG';
+  if (sym.includes('CIPLA') || sym.includes('SUNPHARMA') || sym.includes('REDDY')) return 'Healthcare & Pharma';
+  return 'Other / Uncategorized';
 }
 
 function StatusIndicator({ ok, label, subtext }: { ok: boolean | undefined; label: string; subtext: string }) {
@@ -257,6 +278,37 @@ function PaytmPortfolioContent() {
   const isTokenError = portfolioError?.includes('expired') || portfolioError?.includes('token') || portfolioError?.includes('401');
   const needsAuth = status && status.apiKeyConfigured && status.secretConfigured && (!status.hasAccessToken || status.tokenExpired);
 
+  // Compute Categorized and Total metrics locally if portfolio exists
+  const getSectorBreakdown = (): SectorSummary[] => {
+    if (!portfolio || !portfolio.holdings) return [];
+    
+    const breakdownMap: Record<string, { investment: number; current: number; pnl: number }> = {};
+    
+    portfolio.holdings.forEach((h) => {
+      const sector = h.sector || getSectorForSymbol(h.trading_symbol);
+      const investment = h.investment_value || (h.quantity * h.average_price);
+      const current = h.current_value || (h.quantity * h.last_price);
+      const pnl = h.pnl !== undefined ? h.pnl : (current - investment);
+
+      if (!breakdownMap[sector]) {
+        breakdownMap[sector] = { investment: 0, current: 0, pnl: 0 };
+      }
+      breakdownMap[sector].investment += investment;
+      breakdownMap[sector].current += current;
+      breakdownMap[sector].pnl += pnl;
+    });
+
+    return Object.entries(breakdownMap).map(([sector, data]) => ({
+      sector,
+      investment_value: data.investment,
+      current_value: data.current,
+      pnl: data.pnl,
+      pnl_percent: data.investment > 0 ? (data.pnl / data.investment) * 100 : 0,
+    }));
+  };
+
+  const sectorData = getSectorBreakdown();
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -297,6 +349,45 @@ function PaytmPortfolioContent() {
         <Card><CardContent className="pt-4 flex items-center gap-3"><Server className="h-5 w-5 text-purple-500" /><div><p className="text-xs text-muted-foreground font-medium">App Server Time</p><p className="text-sm font-semibold tabular-nums">{status?.serverTimestamp ? new Date(status.serverTimestamp).toLocaleString() : 'Loading...'}</p></div></CardContent></Card>
         <Card><CardContent className="pt-4 flex items-center gap-3"><Clock className="h-5 w-5 text-emerald-600" /><div><p className="text-xs text-muted-foreground font-medium">Paytm Response Time</p><p className="text-sm font-bold text-emerald-900 tabular-nums">{portfolio?.paytmApiTimestamp ? new Date(portfolio.paytmApiTimestamp).toLocaleString() : 'No Connection'}</p></div></CardContent></Card>
       </div>
+
+      {/* 1. Added Requirement: Total Portfolio Summary Metric Cards */}
+      {portfolio && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+          <Card className="bg-slate-50/50">
+            <CardContent className="pt-4">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Total Investment</p>
+              <h3 className="text-2xl font-bold text-slate-900 mt-1">₹{portfolio.totalInvestment.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</h3>
+            </CardContent>
+          </Card>
+          <Card className="bg-slate-50/50">
+            <CardContent className="pt-4">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Current Value</p>
+              <h3 className="text-2xl font-bold text-slate-900 mt-1">₹{portfolio.totalCurrentValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</h3>
+            </CardContent>
+          </Card>
+          <Card className={portfolio.totalPnl >= 0 ? "bg-green-50/30 border-green-100" : "bg-red-50/30 border-red-100"}>
+            <CardContent className="pt-4">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Total P&L</p>
+              <div className="flex items-baseline gap-2 mt-1">
+                <h3 className={`text-2xl font-bold ${portfolio.totalPnl >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                  ₹{portfolio.totalPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </h3>
+              </div>
+            </CardContent>
+          </Card>
+          <Card className={portfolio.totalPnl >= 0 ? "bg-green-50/30 border-green-100" : "bg-red-50/30 border-red-100"}>
+            <CardContent className="pt-4">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Returns %</p>
+              <div className="flex items-center gap-1.5 mt-1">
+                {portfolio.totalPnl >= 0 ? <TrendingUp className="h-5 w-5 text-green-600" /> : <TrendingDown className="h-5 w-5 text-red-600" />}
+                <h3 className={`text-2xl font-bold ${portfolio.totalPnl >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                  {portfolio.totalPnlPercent.toFixed(2)}%
+                </h3>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       <Card className="border-purple-200 bg-purple-50/10">
         <CardHeader className="pb-2">
@@ -435,9 +526,52 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
+      {/* 2. Added Requirement: Sector-wise Breakdown Panel */}
+      {portfolio && sectorData.length > 0 && (
+        <Card className="border-slate-200">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-base text-slate-800">
+              <PieChart className="h-4 w-4 text-indigo-500" /> Sector Allocation & Performance
+            </CardTitle>
+            <CardDescription>Aggregated summary of portfolio metrics organized across primary industry sectors</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Sector</TableHead>
+                  <TableHead className="text-right">Invested Value</TableHead>
+                  <TableHead className="text-right">Current Value</TableHead>
+                  <TableHead className="text-right">Net P&L</TableHead>
+                  <TableHead className="text-right">Growth %</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sectorData.map((s, idx) => (
+                  <TableRow key={idx}>
+                    <td className="font-medium text-sm py-2">{s.sector}</td>
+                    <td className="text-right text-sm font-mono">₹{s.investment_value.toFixed(2)}</td>
+                    <td className="text-right text-sm font-mono">₹{s.current_value.toFixed(2)}</td>
+                    <td className={`text-right text-sm font-mono font-semibold ${s.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {s.pnl >= 0 ? '+' : ''}₹{s.pnl.toFixed(2)}
+                    </td>
+                    <td className={`text-right text-sm font-mono font-bold ${s.pnl_percent >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {s.pnl_percent.toFixed(2)}%
+                    </td>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
       {portfolio && (
         <Card>
-          <CardContent className="pt-6">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base text-slate-800">All Asset Holdings</CardTitle>
+          </CardHeader>
+          <CardContent className="pt-2">
             <div className="flex gap-2 mb-4">
               {portfolio.source && <Badge variant="outline">{portfolio.source}</Badge>}
               {portfolio.agentModel && <Badge variant="secondary">{portfolio.agentModel}</Badge>}
@@ -452,14 +586,27 @@ function PaytmPortfolioContent() {
 
             <ScrollArea className="h-[350px]">
               <Table>
-                <TableHeader><TableRow><TableHead>Symbol</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">LTP</TableHead><TableHead className="text-right">P&L</TableHead></TableRow></TableHeader>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Symbol</TableHead>
+                    <TableHead>Sector</TableHead>
+                    <TableHead className="text-right">Qty</TableHead>
+                    <TableHead className="text-right">Avg Price</TableHead>
+                    <TableHead className="text-right">LTP</TableHead>
+                    <TableHead className="text-right">P&L (%)</TableHead>
+                  </TableRow>
+                </TableHeader>
                 <TableBody>
                   {portfolio.holdings.map((h, i) => (
                     <TableRow key={i}>
                       <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
+                      <TableCell><Badge variant="outline" className="text-xxs font-normal">{h.sector || getSectorForSymbol(h.trading_symbol)}</Badge></TableCell>
                       <TableCell className="text-right">{h.quantity}</TableCell>
+                      <TableCell className="text-right">₹{h.average_price.toFixed(2)}</TableCell>
                       <TableCell className="text-right">₹{h.last_price.toFixed(2)}</TableCell>
-                      <TableCell className={`text-right ${h.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>{h.pnl_percent.toFixed(2)}%</TableCell>
+                      <TableCell className={`text-right ${h.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                        ₹{h.pnl.toFixed(2)} ({h.pnl_percent.toFixed(2)}%)
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
