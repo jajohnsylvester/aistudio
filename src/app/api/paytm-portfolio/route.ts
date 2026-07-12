@@ -8,6 +8,48 @@ import {
 const COOKIE_NAME = 'paytm_read_access_token';
 const CLOCK_TOLERANCE_SECONDS = 120;
 
+interface SectorBreakdownEntry {
+  sector: string;
+  currentValue: number;
+  investmentValue: number;
+  pnl: number;
+  percent: number;
+}
+
+// Static fallback map used when the upstream Paytm payload doesn't include
+// a sector/industry field for a given symbol. Keyed by NSE/BSE trading symbol.
+const SECTOR_MAP: Record<string, string> = {
+  INFY: 'Technology', TCS: 'Technology', WIPRO: 'Technology', HCLTECH: 'Technology', TECHM: 'Technology', LTIM: 'Technology',
+  RELIANCE: 'Energy & Oil', ONGC: 'Energy & Oil', BPCL: 'Energy & Oil', IOC: 'Energy & Oil', GAIL: 'Energy & Oil',
+  HDFCBANK: 'Financial Services', ICICIBANK: 'Financial Services', SBIN: 'Financial Services', KOTAKBANK: 'Financial Services', AXISBANK: 'Financial Services', BAJFINANCE: 'Financial Services', INDUSINDBK: 'Financial Services',
+  HINDUNILVR: 'FMCG', ITC: 'FMCG', NESTLEIND: 'FMCG', BRITANNIA: 'FMCG', DABUR: 'FMCG',
+  SUNPHARMA: 'Pharma', DRREDDY: 'Pharma', CIPLA: 'Pharma', DIVISLAB: 'Pharma',
+  MARUTI: 'Automobile', TATAMOTORS: 'Automobile', 'M&M': 'Automobile', 'BAJAJ-AUTO': 'Automobile', EICHERMOT: 'Automobile',
+  BHARTIARTL: 'Telecom', IDEA: 'Telecom',
+  LT: 'Infrastructure', ADANIPORTS: 'Infrastructure', ULTRACEMCO: 'Infrastructure', GRASIM: 'Infrastructure',
+  TATASTEEL: 'Metals & Mining', JSWSTEEL: 'Metals & Mining', HINDALCO: 'Metals & Mining', COALINDIA: 'Metals & Mining',
+};
+
+function resolveSector(symbol: string, raw: Record<string, unknown>): string {
+  const rawSector = (raw.sector || raw.industry || raw.sector_name || raw.industry_name) as string | undefined;
+  if (rawSector && typeof rawSector === 'string' && rawSector.trim().length > 0) return rawSector.trim();
+  return SECTOR_MAP[symbol] || 'Others';
+}
+
+function computeSectorBreakdown(holdings: Holding[], totalCurrentValue: number): SectorBreakdownEntry[] {
+  const grouped = new Map<string, SectorBreakdownEntry>();
+  for (const h of holdings) {
+    const existing = grouped.get(h.sector) || { sector: h.sector, currentValue: 0, investmentValue: 0, pnl: 0, percent: 0 };
+    existing.currentValue += h.current_value;
+    existing.investmentValue += h.investment_value;
+    existing.pnl += h.pnl;
+    grouped.set(h.sector, existing);
+  }
+  return Array.from(grouped.values())
+    .map(entry => ({ ...entry, percent: totalCurrentValue > 0 ? (entry.currentValue / totalCurrentValue) * 100 : 0 }))
+    .sort((a, b) => b.currentValue - a.currentValue);
+}
+
 function decodeJwtTimestamps(token: string) {
   try {
     const parts = token.split('.');
@@ -78,8 +120,10 @@ async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holding
         ? parseFloat(h.pnl_percent as string) 
         : (investmentValue > 0 ? (calculatedPnl / investmentValue) * 100 : 0);
 
+      const tradingSymbol = (h.nse_symbol || h.bse_symbol || h.display_name || h.trading_symbol || 'Unknown') as string;
+
       return {
-        trading_symbol: (h.nse_symbol || h.bse_symbol || h.display_name || h.trading_symbol || 'Unknown') as string,
+        trading_symbol: tradingSymbol,
         exchange: (h.exchange && h.exchange !== 'ALL') ? (h.exchange as string) : (h.nse_symbol ? 'NSE' : 'BSE'),
         quantity,
         average_price: averagePrice,
@@ -88,6 +132,7 @@ async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holding
         pnl_percent: pnlPercent,
         current_value: currentValue,
         investment_value: investmentValue,
+        sector: resolveSector(tradingSymbol, h),
       };
     });
 
@@ -275,9 +320,12 @@ export async function GET(request: NextRequest) {
         holdings, totalInvestment, totalCurrentValue, totalPnl, totalPnlPercent
       );
 
+      const sectorBreakdown = computeSectorBreakdown(holdings, totalCurrentValue);
+
       return NextResponse.json({
         holdings, totalInvestment, totalCurrentValue, totalPnl, totalPnlPercent,
         insights, agentModel,
+        sectorBreakdown,
         lastUpdated: new Date().toISOString(),
         paytmApiTimestamp: upstreamTime,
         jwtMeta: decodeJwtTimestamps(cookieToken.value),
