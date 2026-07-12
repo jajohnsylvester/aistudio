@@ -182,4 +182,5 @@ export interface Holding {
   pnl_percent: number;
   current_value: number;
   investment_value: number;
+  sector: string;
 }
