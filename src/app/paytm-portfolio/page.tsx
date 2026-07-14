@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, Suspense } from 'react';
+import { useState, useEffect, useCallback, useMemo, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -9,7 +9,8 @@ import { Badge } from '@/components/ui/badge';
 import {
   Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown,
   AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
-  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play, PieChart
+  Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play, PieChart, ChevronDown, ChevronUp,
+  Layers, Plus
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -62,6 +63,11 @@ interface SectorBreakdownEntry {
   percent: number;
 }
 
+interface StrategyData {
+  strategies: string[];
+  mappings: Record<string, string>;
+}
+
 interface PortfolioData {
   totalInvestment: number;
   totalCurrentValue: number;
@@ -78,6 +84,15 @@ interface PortfolioData {
 }
 
 const SECTOR_COLORS = ['#3B82F6', '#F59E0B', '#10B981', '#8B5CF6', '#EF4444', '#06B6D4', '#EC4899', '#84CC16'];
+const STRATEGY_COLORS = ['#2563EB', '#059669', '#F59E0B', '#7C3AED', '#DC2626', '#0891B2', '#DB2777', '#65A30D'];
+const UNASSIGNED_STRATEGY = 'Unassigned';
+const UNASSIGNED_COLOR = '#94A3B8';
+
+function getStrategyColor(strategy: string, strategies: string[]): string {
+  if (strategy === UNASSIGNED_STRATEGY) return UNASSIGNED_COLOR;
+  const idx = strategies.indexOf(strategy);
+  return STRATEGY_COLORS[(idx >= 0 ? idx : 0) % STRATEGY_COLORS.length];
+}
 
 function formatINR(value: number): string {
   return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -137,6 +152,20 @@ function StatusIndicator({ ok, label, subtext }: { ok: boolean | undefined; labe
   );
 }
 
+function CollapseToggle({ isOpen, onToggle, label }: { isOpen: boolean; onToggle: () => void; label: string }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onToggle(); }}
+      aria-label={isOpen ? `Collapse ${label}` : `Expand ${label}`}
+      aria-expanded={isOpen}
+      className="p-1.5 rounded-md hover:bg-black/5 text-slate-500 flex-shrink-0 transition-colors"
+    >
+      {isOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+    </button>
+  );
+}
+
 function PaytmPortfolioContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -157,6 +186,19 @@ function PaytmPortfolioContent() {
   const [toolArguments, setToolArguments] = useState<string>('{}');
   const [mcpResult, setMcpResult] = useState<any>(null);
   const [isExecutingTool, setIsExecutingTool] = useState<boolean>(false);
+
+  const [isJwtSectionOpen, setIsJwtSectionOpen] = useState<boolean>(true);
+  const [isMcpSectionOpen, setIsMcpSectionOpen] = useState<boolean>(true);
+  const [isHoldingsSectionOpen, setIsHoldingsSectionOpen] = useState<boolean>(true);
+  const [isSectorSectionOpen, setIsSectorSectionOpen] = useState<boolean>(true);
+  const [isStatusSectionOpen, setIsStatusSectionOpen] = useState<boolean>(true);
+  const [isStrategySectionOpen, setIsStrategySectionOpen] = useState<boolean>(true);
+
+  const [strategies, setStrategies] = useState<string[]>([]);
+  const [strategyMappings, setStrategyMappings] = useState<Record<string, string>>({});
+  const [isLoadingStrategies, setIsLoadingStrategies] = useState<boolean>(false);
+  const [isSavingStrategy, setIsSavingStrategy] = useState<boolean>(false);
+  const [newStrategyName, setNewStrategyName] = useState<string>('');
 
   const { toast } = useToast();
 
@@ -211,6 +253,65 @@ function PaytmPortfolioContent() {
       setIsLoadingPortfolio(false);
     }
   }, [refreshInterval]);
+
+  const fetchStrategyData = useCallback(async () => {
+    setIsLoadingStrategies(true);
+    try {
+      const response = await fetch('/api/portfolio-strategies?action=list', { credentials: 'include' });
+      const data = await response.json();
+      if (data.error) {
+        toast({ variant: 'destructive', title: 'Failed to load saved strategies', description: data.error });
+      } else {
+        setStrategies(Array.isArray(data.strategies) ? data.strategies : []);
+        setStrategyMappings(data.mappings && typeof data.mappings === 'object' ? data.mappings : {});
+      }
+    } catch (error: any) {
+      toast({ variant: 'destructive', title: 'Failed to load saved strategies', description: error.message });
+    } finally {
+      setIsLoadingStrategies(false);
+    }
+  }, [toast]);
+
+  const persistStrategyData = useCallback(async (nextStrategies: string[], nextMappings: Record<string, string>) => {
+    setIsSavingStrategy(true);
+    try {
+      const response = await fetch('/api/portfolio-strategies?action=save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategies: nextStrategies, mappings: nextMappings }),
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+    } catch (error: any) {
+      toast({ variant: 'destructive', title: 'Failed to save strategy data', description: error.message });
+    } finally {
+      setIsSavingStrategy(false);
+    }
+  }, [toast]);
+
+  const handleAddStrategy = useCallback(async () => {
+    const name = newStrategyName.trim();
+    if (!name) return;
+    if (strategies.some((s) => s.toLowerCase() === name.toLowerCase())) {
+      toast({ variant: 'destructive', title: 'Strategy already exists', description: `"${name}" is already in your strategy list.` });
+      return;
+    }
+    const nextStrategies = [...strategies, name];
+    setStrategies(nextStrategies);
+    setNewStrategyName('');
+    await persistStrategyData(nextStrategies, strategyMappings);
+  }, [newStrategyName, strategies, strategyMappings, persistStrategyData, toast]);
+
+  const handleAssignStrategy = useCallback(async (symbol: string, strategy: string) => {
+    const nextMappings = { ...strategyMappings };
+    if (strategy === UNASSIGNED_STRATEGY) {
+      delete nextMappings[symbol];
+    } else {
+      nextMappings[symbol] = strategy;
+    }
+    setStrategyMappings(nextMappings);
+    await persistStrategyData(strategies, nextMappings);
+  }, [strategyMappings, strategies, persistStrategyData]);
 
   const runMcpToolCall = async () => {
     if (!selectedTool) return;
@@ -276,6 +377,10 @@ function PaytmPortfolioContent() {
   }, [checkStatus, requestToken]);
 
   useEffect(() => {
+    fetchStrategyData();
+  }, [fetchStrategyData]);
+
+  useEffect(() => {
     if (status && status.hasAccessToken && status.tokenExpired && !requestToken) {
       fetch('/api/paytm-portfolio?action=clear_token', { credentials: 'include' }).then(() => {
         setStatus(prev => prev ? { ...prev, hasAccessToken: false, tokenExpired: false } : prev);
@@ -314,6 +419,38 @@ function PaytmPortfolioContent() {
   const activeJwtMeta = portfolio?.jwtMeta || status?.jwtMeta;
   const isTokenError = portfolioError?.includes('expired') || portfolioError?.includes('token') || portfolioError?.includes('401');
   const needsAuth = status && status.apiKeyConfigured && status.secretConfigured && (!status.hasAccessToken || status.tokenExpired);
+
+  // Merge freshly-fetched holdings with the previously saved symbol -> strategy
+  // assignments, so re-categorization is remembered across refreshes/sessions.
+  const holdingsWithStrategy = useMemo(() => {
+    if (!portfolio) return [];
+    return portfolio.holdings.map((h) => ({
+      ...h,
+      strategy: strategyMappings[h.trading_symbol] || UNASSIGNED_STRATEGY,
+    }));
+  }, [portfolio, strategyMappings]);
+
+  const strategySummaries = useMemo(() => {
+    const bucketOrder = [...strategies, UNASSIGNED_STRATEGY];
+    const buckets = new Map<string, { strategy: string; investmentValue: number; currentValue: number; pnl: number; holdings: typeof holdingsWithStrategy }>();
+    bucketOrder.forEach((name) => buckets.set(name, { strategy: name, investmentValue: 0, currentValue: 0, pnl: 0, holdings: [] }));
+
+    holdingsWithStrategy.forEach((h) => {
+      const key = buckets.has(h.strategy) ? h.strategy : UNASSIGNED_STRATEGY;
+      const bucket = buckets.get(key)!;
+      bucket.investmentValue += h.investment_value;
+      bucket.currentValue += h.current_value;
+      bucket.pnl += h.pnl;
+      bucket.holdings.push(h);
+    });
+
+    return Array.from(buckets.values())
+      .filter((b) => b.holdings.length > 0 || b.strategy !== UNASSIGNED_STRATEGY)
+      .map((b) => ({
+        ...b,
+        pnlPercent: b.investmentValue > 0 ? (b.pnl / b.investmentValue) * 100 : 0,
+      }));
+  }, [holdingsWithStrategy, strategies]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -391,32 +528,55 @@ function PaytmPortfolioContent() {
       )}
 
       <Card className="border-purple-200 bg-purple-50/10">
-        <CardHeader className="pb-2">
-          <CardTitle className="flex items-center gap-2 text-base text-purple-900"><Fingerprint className="h-4 w-4" />JWT Claims Inspector</CardTitle>
-          <CardDescription>Validating Issued At (iat) and Expiration (exp) time claims directly from token payload</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {activeJwtMeta ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
-              <div className="p-3 bg-white border rounded-lg shadow-sm">
-                <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Issued At (iat)</span>
-                <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.iatStr ? new Date(activeJwtMeta.iatStr).toLocaleString() : 'N/A'}</p>
-                <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawIat}</span>
-              </div>
-              <div className="p-3 bg-white border rounded-lg shadow-sm">
-                <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Expires At (exp)</span>
-                <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.expStr ? new Date(activeJwtMeta.expStr).toLocaleString() : 'N/A'}</p>
-                <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawExp}</span>
-              </div>
+        <CardHeader
+          className="pb-2 cursor-pointer select-none"
+          onClick={() => setIsJwtSectionOpen((o) => !o)}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-base text-purple-900"><Fingerprint className="h-4 w-4" />JWT Claims Inspector</CardTitle>
+              <CardDescription>Validating Issued At (iat) and Expiration (exp) time claims directly from token payload</CardDescription>
             </div>
-          ) : (
-            <p className="text-xs text-muted-foreground py-2 italic">Authenticate or fetch portfolio metrics to read token payload properties.</p>
-          )}
-        </CardContent>
+            <CollapseToggle isOpen={isJwtSectionOpen} onToggle={() => setIsJwtSectionOpen((o) => !o)} label="JWT Claims Inspector" />
+          </div>
+        </CardHeader>
+        {isJwtSectionOpen && (
+          <CardContent>
+            {activeJwtMeta ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
+                <div className="p-3 bg-white border rounded-lg shadow-sm">
+                  <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Issued At (iat)</span>
+                  <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.iatStr ? new Date(activeJwtMeta.iatStr).toLocaleString() : 'N/A'}</p>
+                  <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawIat}</span>
+                </div>
+                <div className="p-3 bg-white border rounded-lg shadow-sm">
+                  <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Expires At (exp)</span>
+                  <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.expStr ? new Date(activeJwtMeta.expStr).toLocaleString() : 'N/A'}</p>
+                  <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawExp}</span>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground py-2 italic">Authenticate or fetch portfolio metrics to read token payload properties.</p>
+            )}
+          </CardContent>
+        )}
       </Card>
 
       <Card>
-        <CardContent className="pt-6">
+        <CardHeader
+          className="pb-2 cursor-pointer select-none"
+          onClick={() => setIsStatusSectionOpen((o) => !o)}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-base"><Shield className="h-4 w-4" />Connection Status</CardTitle>
+              <CardDescription>Live health of credentials, session, and data sync</CardDescription>
+            </div>
+            <CollapseToggle isOpen={isStatusSectionOpen} onToggle={() => setIsStatusSectionOpen((o) => !o)} label="Connection Status" />
+          </div>
+        </CardHeader>
+        {isStatusSectionOpen && (
+        <CardContent className="pt-0">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatusIndicator ok={status?.apiKeyConfigured} label="API Key" subtext={status?.apiKeyConfigured ? 'Secured' : 'Missing'} />
             <StatusIndicator ok={status?.secretConfigured} label="API Secret" subtext={status?.secretConfigured ? 'Secured' : 'Missing'} />
@@ -424,16 +584,26 @@ function PaytmPortfolioContent() {
             <StatusIndicator ok={!!portfolio} label="Data Pipeline" subtext={portfolio ? 'Synced' : 'Dormant'} />
           </div>
         </CardContent>
+        )}
       </Card>
 
       {status?.hasAccessToken && !status?.tokenExpired && status.tools && status.tools.length > 0 && (
         <Card className="border-blue-200">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-base text-blue-900">
-              <Bot className="h-4 w-4" /> Available Model Context Protocol (MCP) Tools
-            </CardTitle>
-            <CardDescription>Direct interface functionality discovery extracted from running server instance maps</CardDescription>
+          <CardHeader
+            className="pb-2 cursor-pointer select-none"
+            onClick={() => setIsMcpSectionOpen((o) => !o)}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base text-blue-900">
+                  <Bot className="h-4 w-4" /> Available Model Context Protocol (MCP) Tools
+                </CardTitle>
+                <CardDescription>Direct interface functionality discovery extracted from running server instance maps</CardDescription>
+              </div>
+              <CollapseToggle isOpen={isMcpSectionOpen} onToggle={() => setIsMcpSectionOpen((o) => !o)} label="MCP Tools" />
+            </div>
           </CardHeader>
+          {isMcpSectionOpen && (
           <CardContent className="space-y-4 pt-2">
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="md:col-span-1 space-y-2">
@@ -480,6 +650,7 @@ function PaytmPortfolioContent() {
               </div>
             )}
           </CardContent>
+          )}
         </Card>
       )}
 
@@ -530,10 +701,19 @@ function PaytmPortfolioContent() {
       {portfolio && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <Card className="lg:col-span-2">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-base">Asset Holdings Detail</CardTitle>
-              <CardDescription>Live pricing and gains calculated from response array mapping</CardDescription>
+            <CardHeader
+              className="pb-2 cursor-pointer select-none"
+              onClick={() => setIsHoldingsSectionOpen((o) => !o)}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <CardTitle className="text-base">Asset Holdings Detail</CardTitle>
+                  <CardDescription>Live pricing and gains calculated from response array mapping</CardDescription>
+                </div>
+                <CollapseToggle isOpen={isHoldingsSectionOpen} onToggle={() => setIsHoldingsSectionOpen((o) => !o)} label="Asset Holdings Detail" />
+              </div>
             </CardHeader>
+            {isHoldingsSectionOpen && (
             <CardContent>
               <div className="flex gap-2 mb-4">
                 {portfolio.source && <Badge variant="outline">{portfolio.source}</Badge>}
@@ -553,6 +733,7 @@ function PaytmPortfolioContent() {
                     <TableRow>
                       <TableHead>Symbol</TableHead>
                       <TableHead>Sector</TableHead>
+                      <TableHead>Strategy</TableHead>
                       <TableHead className="text-right">Qty</TableHead>
                       <TableHead className="text-right">Avg Price</TableHead>
                       <TableHead className="text-right">LTP</TableHead>
@@ -560,10 +741,24 @@ function PaytmPortfolioContent() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {portfolio.holdings.map((h, i) => (
+                    {holdingsWithStrategy.map((h, i) => (
                       <TableRow key={i}>
                         <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
                         <TableCell><Badge variant="outline" className="font-normal">{h.sector}</Badge></TableCell>
+                        <TableCell>
+                          <select
+                            value={h.strategy}
+                            onChange={(e) => handleAssignStrategy(h.trading_symbol, e.target.value)}
+                            disabled={isSavingStrategy}
+                            className="text-xs border rounded-md pl-2 pr-6 py-1 outline-none bg-white font-medium cursor-pointer disabled:opacity-60"
+                            style={{ color: getStrategyColor(h.strategy, strategies), borderColor: getStrategyColor(h.strategy, strategies) }}
+                          >
+                            <option value={UNASSIGNED_STRATEGY}>Unassigned</option>
+                            {strategies.map((s) => (
+                              <option key={s} value={s}>{s}</option>
+                            ))}
+                          </select>
+                        </TableCell>
                         <TableCell className="text-right">{h.quantity}</TableCell>
                         <TableCell className="text-right">₹{h.average_price.toFixed(2)}</TableCell>
                         <TableCell className="text-right">₹{h.last_price.toFixed(2)}</TableCell>
@@ -576,14 +771,24 @@ function PaytmPortfolioContent() {
                 </Table>
               </ScrollArea>
             </CardContent>
+            )}
           </Card>
 
           {portfolio.sectorBreakdown && portfolio.sectorBreakdown.length > 0 && (
             <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="flex items-center gap-2 text-base"><PieChart className="h-4 w-4" />Sector Diversification Matrix</CardTitle>
-                <CardDescription>Proportional exposure computed from real asset sector objects</CardDescription>
+              <CardHeader
+                className="pb-2 cursor-pointer select-none"
+                onClick={() => setIsSectorSectionOpen((o) => !o)}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <CardTitle className="flex items-center gap-2 text-base"><PieChart className="h-4 w-4" />Sector Diversification Matrix</CardTitle>
+                    <CardDescription>Proportional exposure computed from real asset sector objects</CardDescription>
+                  </div>
+                  <CollapseToggle isOpen={isSectorSectionOpen} onToggle={() => setIsSectorSectionOpen((o) => !o)} label="Sector Diversification Matrix" />
+                </div>
               </CardHeader>
+              {isSectorSectionOpen && (
               <CardContent>
                 <SectorDiversificationChart data={portfolio.sectorBreakdown} />
                 <div className="mt-4 space-y-3">
@@ -609,9 +814,103 @@ function PaytmPortfolioContent() {
                   ))}
                 </div>
               </CardContent>
+              )}
             </Card>
           )}
         </div>
+      )}
+
+      {portfolio && (
+        <Card>
+          <CardHeader
+            className="pb-2 cursor-pointer select-none"
+            onClick={() => setIsStrategySectionOpen((o) => !o)}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base"><Layers className="h-4 w-4" />Strategy Allocation</CardTitle>
+                <CardDescription>Group holdings into your own strategies and track performance per bucket</CardDescription>
+              </div>
+              <CollapseToggle isOpen={isStrategySectionOpen} onToggle={() => setIsStrategySectionOpen((o) => !o)} label="Strategy Allocation" />
+            </div>
+          </CardHeader>
+          {isStrategySectionOpen && (
+            <CardContent>
+              <div className="flex flex-wrap items-center gap-2 mb-5">
+                <input
+                  type="text"
+                  value={newStrategyName}
+                  onChange={(e) => setNewStrategyName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleAddStrategy(); }}
+                  placeholder="New strategy name e.g. Coffee Can"
+                  disabled={isSavingStrategy}
+                  className="flex-1 min-w-[220px] text-sm p-2 border rounded-md outline-none disabled:opacity-60"
+                />
+                <Button size="sm" onClick={handleAddStrategy} disabled={isSavingStrategy || !newStrategyName.trim()}>
+                  {isSavingStrategy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Plus className="h-3.5 w-3.5 mr-1.5" />}
+                  Add Strategy
+                </Button>
+                {isLoadingStrategies && (
+                  <span className="text-xs text-muted-foreground flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" />Loading saved strategies…</span>
+                )}
+              </div>
+
+              {strategySummaries.length === 0 ? (
+                <p className="text-xs text-muted-foreground italic">No strategies yet — add one above, then assign it to a holding from the "Strategy" column in the table.</p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                  {strategySummaries.map((s) => {
+                    const color = getStrategyColor(s.strategy, strategies);
+                    return (
+                      <div key={s.strategy} className="rounded-lg border overflow-hidden bg-white flex flex-col">
+                        <div className="px-4 py-2.5 text-white font-semibold text-sm" style={{ backgroundColor: color }}>
+                          {s.strategy}
+                        </div>
+                        <div className="grid grid-cols-3 divide-x border-b bg-slate-50/60">
+                          <div className="px-2 py-2 text-center">
+                            <p className="text-xxs text-muted-foreground">Sum</p>
+                            <p className="text-xs font-bold tabular-nums">{formatINR(s.currentValue)}</p>
+                          </div>
+                          <div className="px-2 py-2 text-center">
+                            <p className="text-xxs text-muted-foreground">P&L</p>
+                            <p className={`text-xs font-bold tabular-nums ${s.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>{formatINR(s.pnl)}</p>
+                          </div>
+                          <div className="px-2 py-2 text-center">
+                            <p className="text-xxs text-muted-foreground">Return %</p>
+                            <p className={`text-xs font-bold tabular-nums ${s.pnlPercent >= 0 ? 'text-green-600' : 'text-red-600'}`}>{s.pnlPercent.toFixed(2)}%</p>
+                          </div>
+                        </div>
+                        <div className="max-h-[220px] overflow-y-auto divide-y flex-1">
+                          {s.holdings.length === 0 ? (
+                            <p className="text-xxs text-muted-foreground italic px-4 py-3">No holdings assigned yet.</p>
+                          ) : (
+                            s.holdings.map((h) => (
+                              <div key={h.trading_symbol} className="flex items-center justify-between gap-2 px-4 py-2 text-xs">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span
+                                    className="h-6 w-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0"
+                                    style={{ backgroundColor: color }}
+                                  >
+                                    {h.trading_symbol.slice(0, 2)}
+                                  </span>
+                                  <span className="font-semibold truncate">{h.trading_symbol}</span>
+                                </div>
+                                <div className={`flex items-center gap-1 flex-shrink-0 ${h.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                  {h.pnl >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                                  {h.pnl_percent.toFixed(2)}%
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </CardContent>
+          )}
+        </Card>
       )}
     </div>
   );
