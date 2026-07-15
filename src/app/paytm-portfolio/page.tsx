@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, Suspense } from 'react';
+import { useState, useEffect, useCallback, useMemo, Suspense, type DragEvent } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { getStrategyAssignments, addStrategyAssignment, deleteStrategyAssignment, type StrategyAssignment } from '@/lib/sheets';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
@@ -10,7 +11,7 @@ import {
   Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown,
   AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
   Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play, PieChart, ChevronDown, ChevronUp,
-  Layers, Plus
+  Layers, Plus, X, Activity
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -63,11 +64,6 @@ interface SectorBreakdownEntry {
   percent: number;
 }
 
-interface StrategyData {
-  strategies: string[];
-  mappings: Record<string, string>;
-}
-
 interface PortfolioData {
   totalInvestment: number;
   totalCurrentValue: number;
@@ -83,13 +79,17 @@ interface PortfolioData {
   sectorBreakdown?: SectorBreakdownEntry[];
 }
 
+interface DragPayload {
+  symbol: string;
+  assignmentId: string | null;
+  sourceStrategy: string | null;
+}
+
 const SECTOR_COLORS = ['#3B82F6', '#F59E0B', '#10B981', '#8B5CF6', '#EF4444', '#06B6D4', '#EC4899', '#84CC16'];
 const STRATEGY_COLORS = ['#2563EB', '#059669', '#F59E0B', '#7C3AED', '#DC2626', '#0891B2', '#DB2777', '#65A30D'];
-const UNASSIGNED_STRATEGY = 'Unassigned';
 const UNASSIGNED_COLOR = '#94A3B8';
 
 function getStrategyColor(strategy: string, strategies: string[]): string {
-  if (strategy === UNASSIGNED_STRATEGY) return UNASSIGNED_COLOR;
   const idx = strategies.indexOf(strategy);
   return STRATEGY_COLORS[(idx >= 0 ? idx : 0) % STRATEGY_COLORS.length];
 }
@@ -177,8 +177,8 @@ function PaytmPortfolioContent() {
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [isLoadingPortfolio, setIsLoadingPortfolio] = useState(false);
   const [clientTime, setClientTime] = useState<string>('');
-  
-  const [refreshInterval, setRefreshInterval] = useState<number>(300); 
+
+  const [refreshInterval, setRefreshInterval] = useState<number>(300);
   const [isAutoRefreshEnabled, setIsAutoRefreshEnabled] = useState<boolean>(true);
   const [secondsUntilNextRefresh, setSecondsUntilNextRefresh] = useState<number>(300);
 
@@ -187,18 +187,20 @@ function PaytmPortfolioContent() {
   const [mcpResult, setMcpResult] = useState<any>(null);
   const [isExecutingTool, setIsExecutingTool] = useState<boolean>(false);
 
-  const [isJwtSectionOpen, setIsJwtSectionOpen] = useState<boolean>(true);
-  const [isMcpSectionOpen, setIsMcpSectionOpen] = useState<boolean>(true);
+  // Only three collapsible states remain: Holdings/Sector default open (now
+  // up top), Strategy Allocation default open (right below Holdings), and a
+  // single Diagnostics group (clocks + JWT + Connection Status + MCP Tools)
+  // that is collapsed by default and lives at the bottom of the page.
   const [isHoldingsSectionOpen, setIsHoldingsSectionOpen] = useState<boolean>(true);
   const [isSectorSectionOpen, setIsSectorSectionOpen] = useState<boolean>(true);
-  const [isStatusSectionOpen, setIsStatusSectionOpen] = useState<boolean>(true);
   const [isStrategySectionOpen, setIsStrategySectionOpen] = useState<boolean>(true);
+  const [isDiagnosticsSectionOpen, setIsDiagnosticsSectionOpen] = useState<boolean>(false);
 
-  const [strategies, setStrategies] = useState<string[]>([]);
-  const [strategyMappings, setStrategyMappings] = useState<Record<string, string>>({});
+  const [assignments, setAssignments] = useState<StrategyAssignment[]>([]);
   const [isLoadingStrategies, setIsLoadingStrategies] = useState<boolean>(false);
   const [isSavingStrategy, setIsSavingStrategy] = useState<boolean>(false);
   const [newStrategyName, setNewStrategyName] = useState<string>('');
+  const [dragOverTarget, setDragOverTarget] = useState<string | null>(null); // '' = Unassigned pool, else strategy name
 
   const { toast } = useToast();
 
@@ -214,7 +216,7 @@ function PaytmPortfolioContent() {
       const response = await fetch('/api/paytm-portfolio?action=status', { credentials: 'include' });
       const statusData: MCPStatus = await response.json();
       setStatus(statusData);
-      
+
       if (statusData.refreshIntervalSeconds) {
         setRefreshInterval(statusData.refreshIntervalSeconds);
         setSecondsUntilNextRefresh(statusData.refreshIntervalSeconds);
@@ -254,17 +256,13 @@ function PaytmPortfolioContent() {
     }
   }, [refreshInterval]);
 
-  const fetchStrategyData = useCallback(async () => {
+  // Strategy allocation is persisted directly via the '@/lib/sheets' server
+  // actions (same pattern as ScratchNotes) rather than a REST API route.
+  const fetchStrategyAssignments = useCallback(async () => {
     setIsLoadingStrategies(true);
     try {
-      const response = await fetch('/api/portfolio-strategies?action=list', { credentials: 'include' });
-      const data = await response.json();
-      if (data.error) {
-        toast({ variant: 'destructive', title: 'Failed to load saved strategies', description: data.error });
-      } else {
-        setStrategies(Array.isArray(data.strategies) ? data.strategies : []);
-        setStrategyMappings(data.mappings && typeof data.mappings === 'object' ? data.mappings : {});
-      }
+      const data = await getStrategyAssignments();
+      setAssignments(data);
     } catch (error: any) {
       toast({ variant: 'destructive', title: 'Failed to load saved strategies', description: error.message });
     } finally {
@@ -272,22 +270,56 @@ function PaytmPortfolioContent() {
     }
   }, [toast]);
 
-  const persistStrategyData = useCallback(async (nextStrategies: string[], nextMappings: Record<string, string>) => {
-    setIsSavingStrategy(true);
-    try {
-      const response = await fetch('/api/portfolio-strategies?action=save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ strategies: nextStrategies, mappings: nextMappings }),
-      });
-      const data = await response.json();
-      if (data.error) throw new Error(data.error);
-    } catch (error: any) {
-      toast({ variant: 'destructive', title: 'Failed to save strategy data', description: error.message });
-    } finally {
-      setIsSavingStrategy(false);
-    }
-  }, [toast]);
+  // --- Derived strategy data (declared before the handlers that close over them) ---
+
+  const strategies = useMemo(() => {
+    const set = new Set<string>();
+    assignments.forEach((a) => { if (a.strategy) set.add(a.strategy); });
+    return Array.from(set);
+  }, [assignments]);
+
+  const symbolAssignmentsMap = useMemo(() => {
+    const map = new Map<string, { id: string; strategy: string }[]>();
+    assignments.forEach((a) => {
+      if (!a.symbol) return; // strategy-only definition row, not a holding assignment
+      const list = map.get(a.symbol) || [];
+      list.push({ id: a.id, strategy: a.strategy });
+      map.set(a.symbol, list);
+    });
+    return map;
+  }, [assignments]);
+
+  const holdingsWithStrategy = useMemo(() => {
+    if (!portfolio) return [];
+    return portfolio.holdings.map((h) => ({
+      ...h,
+      strategyAssignments: symbolAssignmentsMap.get(h.trading_symbol) || [],
+    }));
+  }, [portfolio, symbolAssignmentsMap]);
+
+  const unassignedHoldings = useMemo(
+    () => holdingsWithStrategy.filter((h) => h.strategyAssignments.length === 0),
+    [holdingsWithStrategy]
+  );
+
+  const strategySummaries = useMemo(() => {
+    return strategies.map((name) => {
+      const holdingsInStrategy = holdingsWithStrategy.filter((h) => h.strategyAssignments.some((sa) => sa.strategy === name));
+      const investmentValue = holdingsInStrategy.reduce((s, h) => s + h.investment_value, 0);
+      const currentValue = holdingsInStrategy.reduce((s, h) => s + h.current_value, 0);
+      const pnl = holdingsInStrategy.reduce((s, h) => s + h.pnl, 0);
+      return {
+        strategy: name,
+        holdings: holdingsInStrategy,
+        investmentValue,
+        currentValue,
+        pnl,
+        pnlPercent: investmentValue > 0 ? (pnl / investmentValue) * 100 : 0,
+      };
+    });
+  }, [strategies, holdingsWithStrategy]);
+
+  // --- Strategy allocation handlers ---
 
   const handleAddStrategy = useCallback(async () => {
     const name = newStrategyName.trim();
@@ -296,22 +328,72 @@ function PaytmPortfolioContent() {
       toast({ variant: 'destructive', title: 'Strategy already exists', description: `"${name}" is already in your strategy list.` });
       return;
     }
-    const nextStrategies = [...strategies, name];
-    setStrategies(nextStrategies);
-    setNewStrategyName('');
-    await persistStrategyData(nextStrategies, strategyMappings);
-  }, [newStrategyName, strategies, strategyMappings, persistStrategyData, toast]);
-
-  const handleAssignStrategy = useCallback(async (symbol: string, strategy: string) => {
-    const nextMappings = { ...strategyMappings };
-    if (strategy === UNASSIGNED_STRATEGY) {
-      delete nextMappings[symbol];
-    } else {
-      nextMappings[symbol] = strategy;
+    setIsSavingStrategy(true);
+    try {
+      const created = await addStrategyAssignment({ symbol: '', strategy: name });
+      setAssignments((prev) => [...prev, created]);
+      setNewStrategyName('');
+    } catch (error: any) {
+      toast({ variant: 'destructive', title: 'Failed to add strategy', description: error.message });
+    } finally {
+      setIsSavingStrategy(false);
     }
-    setStrategyMappings(nextMappings);
-    await persistStrategyData(strategies, nextMappings);
-  }, [strategyMappings, strategies, persistStrategyData]);
+  }, [newStrategyName, strategies, toast]);
+
+  const handleAssignToStrategy = useCallback(async (symbol: string, targetStrategy: string) => {
+    const alreadyAssigned = assignments.some((a) => a.symbol === symbol && a.strategy === targetStrategy);
+    if (alreadyAssigned) return;
+
+    setIsSavingStrategy(true);
+    try {
+      const created = await addStrategyAssignment({ symbol, strategy: targetStrategy });
+      setAssignments((prev) => [...prev, created]);
+    } catch (error: any) {
+      toast({ variant: 'destructive', title: 'Failed to assign holding', description: error.message });
+    } finally {
+      setIsSavingStrategy(false);
+    }
+  }, [assignments, toast]);
+
+  const handleUnassign = useCallback(async (assignmentId: string) => {
+    setIsSavingStrategy(true);
+    try {
+      await deleteStrategyAssignment(assignmentId);
+      setAssignments((prev) => prev.filter((a) => a.id !== assignmentId));
+    } catch (error: any) {
+      toast({ variant: 'destructive', title: 'Failed to remove assignment', description: error.message });
+    } finally {
+      setIsSavingStrategy(false);
+    }
+  }, [toast]);
+
+  const handleChipDragStart = (e: DragEvent<HTMLDivElement>, payload: DragPayload) => {
+    e.dataTransfer.setData('application/json', JSON.stringify(payload));
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleDropOnStrategy = (e: DragEvent<HTMLDivElement>, targetStrategy: string) => {
+    e.preventDefault();
+    setDragOverTarget(null);
+    try {
+      const payload: DragPayload = JSON.parse(e.dataTransfer.getData('application/json'));
+      if (payload.sourceStrategy === targetStrategy) return; // dropped back onto the same card
+      handleAssignToStrategy(payload.symbol, targetStrategy);
+    } catch {
+      // ignore malformed/foreign drag payloads
+    }
+  };
+
+  const handleDropOnUnassigned = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOverTarget(null);
+    try {
+      const payload: DragPayload = JSON.parse(e.dataTransfer.getData('application/json'));
+      if (payload.assignmentId) handleUnassign(payload.assignmentId);
+    } catch {
+      // ignore malformed/foreign drag payloads
+    }
+  };
 
   const runMcpToolCall = async () => {
     if (!selectedTool) return;
@@ -377,8 +459,8 @@ function PaytmPortfolioContent() {
   }, [checkStatus, requestToken]);
 
   useEffect(() => {
-    fetchStrategyData();
-  }, [fetchStrategyData]);
+    fetchStrategyAssignments();
+  }, [fetchStrategyAssignments]);
 
   useEffect(() => {
     if (status && status.hasAccessToken && status.tokenExpired && !requestToken) {
@@ -420,38 +502,6 @@ function PaytmPortfolioContent() {
   const isTokenError = portfolioError?.includes('expired') || portfolioError?.includes('token') || portfolioError?.includes('401');
   const needsAuth = status && status.apiKeyConfigured && status.secretConfigured && (!status.hasAccessToken || status.tokenExpired);
 
-  // Merge freshly-fetched holdings with the previously saved symbol -> strategy
-  // assignments, so re-categorization is remembered across refreshes/sessions.
-  const holdingsWithStrategy = useMemo(() => {
-    if (!portfolio) return [];
-    return portfolio.holdings.map((h) => ({
-      ...h,
-      strategy: strategyMappings[h.trading_symbol] || UNASSIGNED_STRATEGY,
-    }));
-  }, [portfolio, strategyMappings]);
-
-  const strategySummaries = useMemo(() => {
-    const bucketOrder = [...strategies, UNASSIGNED_STRATEGY];
-    const buckets = new Map<string, { strategy: string; investmentValue: number; currentValue: number; pnl: number; holdings: typeof holdingsWithStrategy }>();
-    bucketOrder.forEach((name) => buckets.set(name, { strategy: name, investmentValue: 0, currentValue: 0, pnl: 0, holdings: [] }));
-
-    holdingsWithStrategy.forEach((h) => {
-      const key = buckets.has(h.strategy) ? h.strategy : UNASSIGNED_STRATEGY;
-      const bucket = buckets.get(key)!;
-      bucket.investmentValue += h.investment_value;
-      bucket.currentValue += h.current_value;
-      bucket.pnl += h.pnl;
-      bucket.holdings.push(h);
-    });
-
-    return Array.from(buckets.values())
-      .filter((b) => b.holdings.length > 0 || b.strategy !== UNASSIGNED_STRATEGY)
-      .map((b) => ({
-        ...b,
-        pnlPercent: b.investmentValue > 0 ? (b.pnl / b.investmentValue) * 100 : 0,
-      }));
-  }, [holdingsWithStrategy, strategies]);
-
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -464,8 +514,8 @@ function PaytmPortfolioContent() {
             <div className="flex items-center gap-2 border rounded-lg p-1.5 bg-slate-50 text-xs font-medium mr-2">
               <Timer className="h-3.5 w-3.5 text-slate-500" />
               <span>Interval:</span>
-              <select 
-                value={refreshInterval} 
+              <select
+                value={refreshInterval}
                 onChange={(e) => handleIntervalChange(Number(e.target.value))}
                 className="bg-transparent border-none outline-none font-semibold text-slate-700 cursor-pointer"
               >
@@ -485,12 +535,6 @@ function PaytmPortfolioContent() {
             <RefreshCw className="mr-2 h-4 w-4" /> Refresh
           </Button>
         </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Card><CardContent className="pt-4 flex items-center gap-3"><Laptop className="h-5 w-5 text-blue-500" /><div><p className="text-xs text-muted-foreground font-medium">Browser Clock</p><p className="text-sm font-semibold tabular-nums">{clientTime}</p></div></CardContent></Card>
-        <Card><CardContent className="pt-4 flex items-center gap-3"><Server className="h-5 w-5 text-purple-500" /><div><p className="text-xs text-muted-foreground font-medium">App Server Time</p><p className="text-sm font-semibold tabular-nums">{status?.serverTimestamp ? new Date(status.serverTimestamp).toLocaleString() : 'Loading...'}</p></div></CardContent></Card>
-        <Card><CardContent className="pt-4 flex items-center gap-3"><Clock className="h-5 w-5 text-emerald-600" /><div><p className="text-xs text-muted-foreground font-medium">Paytm Response Time</p><p className="text-sm font-bold text-emerald-900 tabular-nums">{portfolio?.paytmApiTimestamp ? new Date(portfolio.paytmApiTimestamp).toLocaleString() : 'No Connection'}</p></div></CardContent></Card>
       </div>
 
       {portfolio && (
@@ -525,133 +569,6 @@ function PaytmPortfolioContent() {
             </CardContent>
           </Card>
         </div>
-      )}
-
-      <Card className="border-purple-200 bg-purple-50/10">
-        <CardHeader
-          className="pb-2 cursor-pointer select-none"
-          onClick={() => setIsJwtSectionOpen((o) => !o)}
-        >
-          <div className="flex items-start justify-between gap-2">
-            <div>
-              <CardTitle className="flex items-center gap-2 text-base text-purple-900"><Fingerprint className="h-4 w-4" />JWT Claims Inspector</CardTitle>
-              <CardDescription>Validating Issued At (iat) and Expiration (exp) time claims directly from token payload</CardDescription>
-            </div>
-            <CollapseToggle isOpen={isJwtSectionOpen} onToggle={() => setIsJwtSectionOpen((o) => !o)} label="JWT Claims Inspector" />
-          </div>
-        </CardHeader>
-        {isJwtSectionOpen && (
-          <CardContent>
-            {activeJwtMeta ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2">
-                <div className="p-3 bg-white border rounded-lg shadow-sm">
-                  <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Issued At (iat)</span>
-                  <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.iatStr ? new Date(activeJwtMeta.iatStr).toLocaleString() : 'N/A'}</p>
-                  <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawIat}</span>
-                </div>
-                <div className="p-3 bg-white border rounded-lg shadow-sm">
-                  <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Expires At (exp)</span>
-                  <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.expStr ? new Date(activeJwtMeta.expStr).toLocaleString() : 'N/A'}</p>
-                  <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawExp}</span>
-                </div>
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground py-2 italic">Authenticate or fetch portfolio metrics to read token payload properties.</p>
-            )}
-          </CardContent>
-        )}
-      </Card>
-
-      <Card>
-        <CardHeader
-          className="pb-2 cursor-pointer select-none"
-          onClick={() => setIsStatusSectionOpen((o) => !o)}
-        >
-          <div className="flex items-start justify-between gap-2">
-            <div>
-              <CardTitle className="flex items-center gap-2 text-base"><Shield className="h-4 w-4" />Connection Status</CardTitle>
-              <CardDescription>Live health of credentials, session, and data sync</CardDescription>
-            </div>
-            <CollapseToggle isOpen={isStatusSectionOpen} onToggle={() => setIsStatusSectionOpen((o) => !o)} label="Connection Status" />
-          </div>
-        </CardHeader>
-        {isStatusSectionOpen && (
-        <CardContent className="pt-0">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <StatusIndicator ok={status?.apiKeyConfigured} label="API Key" subtext={status?.apiKeyConfigured ? 'Secured' : 'Missing'} />
-            <StatusIndicator ok={status?.secretConfigured} label="API Secret" subtext={status?.secretConfigured ? 'Secured' : 'Missing'} />
-            <StatusIndicator ok={status?.hasAccessToken && !isTokenError} label="Session State" subtext={status?.hasAccessToken && !isTokenError ? 'Active Read Token' : 'OAuth Required'} />
-            <StatusIndicator ok={!!portfolio} label="Data Pipeline" subtext={portfolio ? 'Synced' : 'Dormant'} />
-          </div>
-        </CardContent>
-        )}
-      </Card>
-
-      {status?.hasAccessToken && !status?.tokenExpired && status.tools && status.tools.length > 0 && (
-        <Card className="border-blue-200">
-          <CardHeader
-            className="pb-2 cursor-pointer select-none"
-            onClick={() => setIsMcpSectionOpen((o) => !o)}
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <CardTitle className="flex items-center gap-2 text-base text-blue-900">
-                  <Bot className="h-4 w-4" /> Available Model Context Protocol (MCP) Tools
-                </CardTitle>
-                <CardDescription>Direct interface functionality discovery extracted from running server instance maps</CardDescription>
-              </div>
-              <CollapseToggle isOpen={isMcpSectionOpen} onToggle={() => setIsMcpSectionOpen((o) => !o)} label="MCP Tools" />
-            </div>
-          </CardHeader>
-          {isMcpSectionOpen && (
-          <CardContent className="space-y-4 pt-2">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="md:col-span-1 space-y-2">
-                <label className="text-xs font-semibold text-slate-600 block">Select Target Function</label>
-                <select 
-                  className="w-full text-xs p-2 border rounded-md outline-none bg-white font-medium"
-                  value={selectedTool}
-                  onChange={(e) => setSelectedTool(e.target.value)}
-                >
-                  {status.tools.map((t, idx) => (
-                    <option key={idx} value={t.name}>{t.name}</option>
-                  ))}
-                </select>
-                <div className="p-2.5 bg-slate-50 border rounded-md text-xxs text-slate-500 italic mt-2">
-                  {status.tools.find(t => t.name === selectedTool)?.description}
-                </div>
-              </div>
-              
-              <div className="md:col-span-2 space-y-2">
-                <label className="text-xs font-semibold text-slate-600 block">Arguments Object payload (JSON)</label>
-                <textarea 
-                  className="w-full h-[85px] p-2 border rounded-md font-mono text-xs outline-none bg-white resize-none"
-                  value={toolArguments}
-                  onChange={(e) => setToolArguments(e.target.value)}
-                  placeholder='{"symbol": "INFY", "exchange": "NSE"}'
-                />
-              </div>
-            </div>
-
-            <Button size="sm" className="w-full bg-blue-600 hover:bg-blue-700" onClick={runMcpToolCall} disabled={isExecutingTool}>
-              {isExecutingTool ? <Loader2 className="animate-spin mr-2 h-3.5 w-3.5" /> : <Play className="mr-2 h-3.5 w-3.5" />} 
-              Execute Scoped Server Capability
-            </Button>
-
-            {mcpResult && (
-              <div className="mt-2 border rounded-md overflow-hidden text-xs font-mono">
-                <div className="bg-slate-800 text-slate-200 p-1.5 flex justify-between items-center text-xxs">
-                  <span>CONSOLE RESPONSE OUTPUT</span>
-                  <span className="opacity-60">{mcpResult.timestamp || 'Ready'}</span>
-                </div>
-                <ScrollArea className="h-[120px] bg-slate-950 p-2 text-green-400 overflow-x-auto break-words">
-                  <pre>{JSON.stringify(mcpResult, null, 2)}</pre>
-                </ScrollArea>
-              </div>
-            )}
-          </CardContent>
-          )}
-        </Card>
       )}
 
       {status && (!status.apiKeyConfigured || !status.secretConfigured) && !isLoadingStatus && (
@@ -698,6 +615,7 @@ function PaytmPortfolioContent() {
         </Card>
       )}
 
+      {/* --- Asset Holdings Detail + Sector Diversification Matrix (moved to top) --- */}
       {portfolio && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <Card className="lg:col-span-2">
@@ -746,18 +664,24 @@ function PaytmPortfolioContent() {
                         <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
                         <TableCell><Badge variant="outline" className="font-normal">{h.sector}</Badge></TableCell>
                         <TableCell>
-                          <select
-                            value={h.strategy}
-                            onChange={(e) => handleAssignStrategy(h.trading_symbol, e.target.value)}
-                            disabled={isSavingStrategy}
-                            className="text-xs border rounded-md pl-2 pr-6 py-1 outline-none bg-white font-medium cursor-pointer disabled:opacity-60"
-                            style={{ color: getStrategyColor(h.strategy, strategies), borderColor: getStrategyColor(h.strategy, strategies) }}
-                          >
-                            <option value={UNASSIGNED_STRATEGY}>Unassigned</option>
-                            {strategies.map((s) => (
-                              <option key={s} value={s}>{s}</option>
-                            ))}
-                          </select>
+                          {h.strategyAssignments.length === 0 ? (
+                            <Badge variant="outline" className="font-normal" style={{ color: UNASSIGNED_COLOR, borderColor: UNASSIGNED_COLOR }}>
+                              Unassigned
+                            </Badge>
+                          ) : (
+                            <div className="flex flex-wrap gap-1">
+                              {h.strategyAssignments.map((sa) => (
+                                <Badge
+                                  key={sa.id}
+                                  variant="outline"
+                                  className="font-normal"
+                                  style={{ color: getStrategyColor(sa.strategy, strategies), borderColor: getStrategyColor(sa.strategy, strategies) }}
+                                >
+                                  {sa.strategy}
+                                </Badge>
+                              ))}
+                            </div>
+                          )}
                         </TableCell>
                         <TableCell className="text-right">{h.quantity}</TableCell>
                         <TableCell className="text-right">₹{h.average_price.toFixed(2)}</TableCell>
@@ -820,6 +744,7 @@ function PaytmPortfolioContent() {
         </div>
       )}
 
+      {/* --- Strategy Allocation (drag & drop, below Asset Holdings Detail) --- */}
       {portfolio && (
         <Card>
           <CardHeader
@@ -829,7 +754,7 @@ function PaytmPortfolioContent() {
             <div className="flex items-start justify-between gap-2">
               <div>
                 <CardTitle className="flex items-center gap-2 text-base"><Layers className="h-4 w-4" />Strategy Allocation</CardTitle>
-                <CardDescription>Group holdings into your own strategies and track performance per bucket</CardDescription>
+                <CardDescription>Drag a holding out of Unassigned onto a strategy to categorize it — one asset can belong to more than one strategy</CardDescription>
               </div>
               <CollapseToggle isOpen={isStrategySectionOpen} onToggle={() => setIsStrategySectionOpen((o) => !o)} label="Strategy Allocation" />
             </div>
@@ -855,14 +780,53 @@ function PaytmPortfolioContent() {
                 )}
               </div>
 
-              {strategySummaries.length === 0 ? (
-                <p className="text-xs text-muted-foreground italic">No strategies yet — add one above, then assign it to a holding from the "Strategy" column in the table.</p>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                  {strategySummaries.map((s) => {
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {/* Unassigned pool — the drag source, and also a drop target for removing an assignment */}
+                <div
+                  onDragOver={(e) => { e.preventDefault(); setDragOverTarget(''); }}
+                  onDragLeave={() => setDragOverTarget((t) => (t === '' ? null : t))}
+                  onDrop={handleDropOnUnassigned}
+                  className={`rounded-lg border-2 border-dashed overflow-hidden bg-slate-50/60 flex flex-col transition-colors ${dragOverTarget === '' ? 'border-slate-400 bg-slate-100' : 'border-slate-300'}`}
+                >
+                  <div className="px-4 py-2.5 bg-slate-200 text-slate-700 font-semibold text-sm flex items-center justify-between">
+                    <span>Unassigned</span>
+                    <span className="text-xs font-normal">{unassignedHoldings.length} holdings</span>
+                  </div>
+                  <div className="p-3 flex flex-wrap gap-2 min-h-[120px] flex-1">
+                    {unassignedHoldings.length === 0 ? (
+                      <p className="text-xxs text-muted-foreground italic">All holdings are categorized.</p>
+                    ) : (
+                      unassignedHoldings.map((h) => (
+                        <div
+                          key={h.trading_symbol}
+                          draggable
+                          onDragStart={(e) => handleChipDragStart(e, { symbol: h.trading_symbol, assignmentId: null, sourceStrategy: null })}
+                          className="px-2.5 py-1.5 rounded-md bg-white border text-xs font-semibold cursor-grab active:cursor-grabbing shadow-sm select-none"
+                        >
+                          {h.trading_symbol}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {strategySummaries.length === 0 ? (
+                  <div className="md:col-span-2 xl:col-span-2 flex items-center justify-center text-xs text-muted-foreground italic border rounded-lg p-6">
+                    No strategies yet — add one above, then drag a holding from Unassigned onto it.
+                  </div>
+                ) : (
+                  strategySummaries.map((s) => {
                     const color = getStrategyColor(s.strategy, strategies);
+                    const isDragOver = dragOverTarget === s.strategy;
                     return (
-                      <div key={s.strategy} className="rounded-lg border overflow-hidden bg-white flex flex-col">
+                      <div
+                        key={s.strategy}
+                        onDragOver={(e) => { e.preventDefault(); setDragOverTarget(s.strategy); }}
+                        onDragLeave={() => setDragOverTarget((t) => (t === s.strategy ? null : t))}
+                        onDrop={(e) => handleDropOnStrategy(e, s.strategy)}
+                        className={`rounded-lg border overflow-hidden bg-white flex flex-col transition-shadow ${isDragOver ? 'ring-2 ring-offset-1' : ''}`}
+                        style={isDragOver ? { boxShadow: `0 0 0 2px ${color}` } : undefined}
+                      >
                         <div className="px-4 py-2.5 text-white font-semibold text-sm" style={{ backgroundColor: color }}>
                           {s.strategy}
                         </div>
@@ -880,38 +844,175 @@ function PaytmPortfolioContent() {
                             <p className={`text-xs font-bold tabular-nums ${s.pnlPercent >= 0 ? 'text-green-600' : 'text-red-600'}`}>{s.pnlPercent.toFixed(2)}%</p>
                           </div>
                         </div>
-                        <div className="max-h-[220px] overflow-y-auto divide-y flex-1">
+                        <div className="p-3 flex flex-wrap gap-2 min-h-[100px] flex-1 max-h-[220px] overflow-y-auto content-start">
                           {s.holdings.length === 0 ? (
-                            <p className="text-xxs text-muted-foreground italic px-4 py-3">No holdings assigned yet.</p>
+                            <p className="text-xxs text-muted-foreground italic">Drop a holding here to assign it.</p>
                           ) : (
-                            s.holdings.map((h) => (
-                              <div key={h.trading_symbol} className="flex items-center justify-between gap-2 px-4 py-2 text-xs">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <span
-                                    className="h-6 w-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0"
-                                    style={{ backgroundColor: color }}
+                            s.holdings.map((h) => {
+                              const assignment = h.strategyAssignments.find((sa) => sa.strategy === s.strategy)!;
+                              return (
+                                <div
+                                  key={assignment.id}
+                                  draggable
+                                  onDragStart={(e) => handleChipDragStart(e, { symbol: h.trading_symbol, assignmentId: assignment.id, sourceStrategy: s.strategy })}
+                                  className="flex items-center gap-1 pl-2.5 pr-1.5 py-1.5 rounded-md text-white text-xs font-semibold cursor-grab active:cursor-grabbing shadow-sm select-none"
+                                  style={{ backgroundColor: color }}
+                                >
+                                  {h.trading_symbol}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleUnassign(assignment.id)}
+                                    aria-label={`Remove ${h.trading_symbol} from ${s.strategy}`}
+                                    className="ml-0.5 rounded hover:bg-black/20 p-0.5"
                                   >
-                                    {h.trading_symbol.slice(0, 2)}
-                                  </span>
-                                  <span className="font-semibold truncate">{h.trading_symbol}</span>
+                                    <X className="h-3 w-3" />
+                                  </button>
                                 </div>
-                                <div className={`flex items-center gap-1 flex-shrink-0 ${h.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                  {h.pnl >= 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
-                                  {h.pnl_percent.toFixed(2)}%
-                                </div>
-                              </div>
-                            ))
+                              );
+                            })
                           )}
                         </div>
                       </div>
                     );
-                  })}
-                </div>
-              )}
+                  })
+                )}
+              </div>
             </CardContent>
           )}
         </Card>
       )}
+
+      {/* --- Diagnostics & Connection group: clocks, JWT, connection status, MCP tools — collapsed by default, at the bottom --- */}
+      <Card className="border-slate-200">
+        <CardHeader
+          className="pb-2 cursor-pointer select-none"
+          onClick={() => setIsDiagnosticsSectionOpen((o) => !o)}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <CardTitle className="flex items-center gap-2 text-base"><Activity className="h-4 w-4" />Diagnostics &amp; Connection</CardTitle>
+              <CardDescription>Clocks, JWT claims, connection health, and the MCP tool console</CardDescription>
+            </div>
+            <CollapseToggle isOpen={isDiagnosticsSectionOpen} onToggle={() => setIsDiagnosticsSectionOpen((o) => !o)} label="Diagnostics & Connection" />
+          </div>
+        </CardHeader>
+        {isDiagnosticsSectionOpen && (
+          <CardContent className="space-y-6 pt-2">
+            {/* Clocks */}
+            <div>
+              <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Clocks</h4>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="rounded-lg border p-3 flex items-center gap-3 bg-white">
+                  <Laptop className="h-5 w-5 text-blue-500 flex-shrink-0" />
+                  <div>
+                    <p className="text-xs text-muted-foreground font-medium">Browser Clock</p>
+                    <p className="text-sm font-semibold tabular-nums">{clientTime}</p>
+                  </div>
+                </div>
+                <div className="rounded-lg border p-3 flex items-center gap-3 bg-white">
+                  <Server className="h-5 w-5 text-purple-500 flex-shrink-0" />
+                  <div>
+                    <p className="text-xs text-muted-foreground font-medium">App Server Time</p>
+                    <p className="text-sm font-semibold tabular-nums">{status?.serverTimestamp ? new Date(status.serverTimestamp).toLocaleString() : 'Loading...'}</p>
+                  </div>
+                </div>
+                <div className="rounded-lg border p-3 flex items-center gap-3 bg-white">
+                  <Clock className="h-5 w-5 text-emerald-600 flex-shrink-0" />
+                  <div>
+                    <p className="text-xs text-muted-foreground font-medium">Paytm Response Time</p>
+                    <p className="text-sm font-bold text-emerald-900 tabular-nums">{portfolio?.paytmApiTimestamp ? new Date(portfolio.paytmApiTimestamp).toLocaleString() : 'No Connection'}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* JWT Claims Inspector */}
+            <div>
+              <h4 className="text-xs font-semibold text-purple-700 uppercase tracking-wide mb-2 flex items-center gap-1.5"><Fingerprint className="h-3.5 w-3.5" />JWT Claims Inspector</h4>
+              {activeJwtMeta ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="p-3 bg-white border rounded-lg shadow-sm">
+                    <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Issued At (iat)</span>
+                    <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.iatStr ? new Date(activeJwtMeta.iatStr).toLocaleString() : 'N/A'}</p>
+                    <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawIat}</span>
+                  </div>
+                  <div className="p-3 bg-white border rounded-lg shadow-sm">
+                    <span className="text-xs font-semibold text-purple-700 block mb-1">CLAIM: Expires At (exp)</span>
+                    <p className="text-sm font-bold text-slate-800 tabular-nums">{activeJwtMeta.expStr ? new Date(activeJwtMeta.expStr).toLocaleString() : 'N/A'}</p>
+                    <span className="text-xxs text-slate-400 block mt-1">Unix timestamp: {activeJwtMeta.rawExp}</span>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground py-2 italic">Authenticate or fetch portfolio metrics to read token payload properties.</p>
+              )}
+            </div>
+
+            {/* Connection Status */}
+            <div>
+              <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2 flex items-center gap-1.5"><Shield className="h-3.5 w-3.5" />Connection Status</h4>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <StatusIndicator ok={status?.apiKeyConfigured} label="API Key" subtext={status?.apiKeyConfigured ? 'Secured' : 'Missing'} />
+                <StatusIndicator ok={status?.secretConfigured} label="API Secret" subtext={status?.secretConfigured ? 'Secured' : 'Missing'} />
+                <StatusIndicator ok={status?.hasAccessToken && !isTokenError} label="Session State" subtext={status?.hasAccessToken && !isTokenError ? 'Active Read Token' : 'OAuth Required'} />
+                <StatusIndicator ok={!!portfolio} label="Data Pipeline" subtext={portfolio ? 'Synced' : 'Dormant'} />
+              </div>
+            </div>
+
+            {/* MCP Tools */}
+            {status?.hasAccessToken && !status?.tokenExpired && status.tools && status.tools.length > 0 && (
+              <div>
+                <h4 className="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-2 flex items-center gap-1.5"><Bot className="h-3.5 w-3.5" />Available Model Context Protocol (MCP) Tools</h4>
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="md:col-span-1 space-y-2">
+                      <label className="text-xs font-semibold text-slate-600 block">Select Target Function</label>
+                      <select
+                        className="w-full text-xs p-2 border rounded-md outline-none bg-white font-medium"
+                        value={selectedTool}
+                        onChange={(e) => setSelectedTool(e.target.value)}
+                      >
+                        {status.tools.map((t, idx) => (
+                          <option key={idx} value={t.name}>{t.name}</option>
+                        ))}
+                      </select>
+                      <div className="p-2.5 bg-slate-50 border rounded-md text-xxs text-slate-500 italic mt-2">
+                        {status.tools.find(t => t.name === selectedTool)?.description}
+                      </div>
+                    </div>
+
+                    <div className="md:col-span-2 space-y-2">
+                      <label className="text-xs font-semibold text-slate-600 block">Arguments Object payload (JSON)</label>
+                      <textarea
+                        className="w-full h-[85px] p-2 border rounded-md font-mono text-xs outline-none bg-white resize-none"
+                        value={toolArguments}
+                        onChange={(e) => setToolArguments(e.target.value)}
+                        placeholder='{"symbol": "INFY", "exchange": "NSE"}'
+                      />
+                    </div>
+                  </div>
+
+                  <Button size="sm" className="w-full bg-blue-600 hover:bg-blue-700" onClick={runMcpToolCall} disabled={isExecutingTool}>
+                    {isExecutingTool ? <Loader2 className="animate-spin mr-2 h-3.5 w-3.5" /> : <Play className="mr-2 h-3.5 w-3.5" />}
+                    Execute Scoped Server Capability
+                  </Button>
+
+                  {mcpResult && (
+                    <div className="mt-2 border rounded-md overflow-hidden text-xs font-mono">
+                      <div className="bg-slate-800 text-slate-200 p-1.5 flex justify-between items-center text-xxs">
+                        <span>CONSOLE RESPONSE OUTPUT</span>
+                        <span className="opacity-60">{mcpResult.timestamp || 'Ready'}</span>
+                      </div>
+                      <ScrollArea className="h-[120px] bg-slate-950 p-2 text-green-400 overflow-x-auto break-words">
+                        <pre>{JSON.stringify(mcpResult, null, 2)}</pre>
+                      </ScrollArea>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        )}
+      </Card>
     </div>
   );
 }
