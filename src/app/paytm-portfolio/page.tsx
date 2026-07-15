@@ -88,6 +88,8 @@ interface DragPayload {
 const SECTOR_COLORS = ['#3B82F6', '#F59E0B', '#10B981', '#8B5CF6', '#EF4444', '#06B6D4', '#EC4899', '#84CC16'];
 const STRATEGY_COLORS = ['#2563EB', '#059669', '#F59E0B', '#7C3AED', '#DC2626', '#0891B2', '#DB2777', '#65A30D'];
 const UNASSIGNED_COLOR = '#94A3B8';
+const NEW_HOLDING_COLOR = '#D97706';
+const KNOWN_SYMBOLS_STORAGE_KEY = 'paytm_portfolio_known_symbols';
 
 function getStrategyColor(strategy: string, strategies: string[]): string {
   const idx = strategies.indexOf(strategy);
@@ -201,6 +203,7 @@ function PaytmPortfolioContent() {
   const [isSavingStrategy, setIsSavingStrategy] = useState<boolean>(false);
   const [newStrategyName, setNewStrategyName] = useState<string>('');
   const [dragOverTarget, setDragOverTarget] = useState<string | null>(null); // '' = Unassigned pool, else strategy name
+  const [newlyDiscoveredSymbols, setNewlyDiscoveredSymbols] = useState<Set<string>>(new Set());
 
   const { toast } = useToast();
 
@@ -248,6 +251,31 @@ function PaytmPortfolioContent() {
       } else {
         setPortfolio(data);
         setSecondsUntilNextRefresh(refreshInterval);
+
+        // Diff the freshly-fetched holdings against symbols we've seen
+        // before (persisted in localStorage) so genuinely new holdings can
+        // be highlighted in the Unassigned bucket. The highlight itself is
+        // kept in component state so it survives the localStorage write
+        // below for the rest of this session, instead of disappearing
+        // the instant we record it as "known".
+        try {
+          const stored = typeof window !== 'undefined' ? window.localStorage.getItem(KNOWN_SYMBOLS_STORAGE_KEY) : null;
+          const known: string[] = stored ? JSON.parse(stored) : [];
+          const knownSet = new Set(known);
+          const currentSymbols: string[] = (data.holdings || []).map((h: Holding) => h.trading_symbol);
+          const freshlyNew = currentSymbols.filter((sym) => !knownSet.has(sym));
+
+          if (freshlyNew.length > 0) {
+            setNewlyDiscoveredSymbols((prev) => new Set([...prev, ...freshlyNew]));
+          }
+
+          const mergedKnown = Array.from(new Set([...known, ...currentSymbols]));
+          if (typeof window !== 'undefined') {
+            window.localStorage.setItem(KNOWN_SYMBOLS_STORAGE_KEY, JSON.stringify(mergedKnown));
+          }
+        } catch {
+          // localStorage unavailable (e.g. private browsing) — skip "new holding" highlighting
+        }
       }
     } catch (error: any) {
       setPortfolioError(error.message);
@@ -661,27 +689,58 @@ function PaytmPortfolioContent() {
                   <TableBody>
                     {holdingsWithStrategy.map((h, i) => (
                       <TableRow key={i}>
-                        <TableCell className="font-semibold">{h.trading_symbol}</TableCell>
+                        <TableCell className="font-semibold">
+                          <span className="flex items-center gap-1.5">
+                            {h.trading_symbol}
+                            {newlyDiscoveredSymbols.has(h.trading_symbol) && (
+                              <Badge className="font-semibold text-[9px] px-1.5 py-0" style={{ backgroundColor: NEW_HOLDING_COLOR, color: 'white' }}>
+                                NEW
+                              </Badge>
+                            )}
+                          </span>
+                        </TableCell>
                         <TableCell><Badge variant="outline" className="font-normal">{h.sector}</Badge></TableCell>
                         <TableCell>
-                          {h.strategyAssignments.length === 0 ? (
-                            <Badge variant="outline" className="font-normal" style={{ color: UNASSIGNED_COLOR, borderColor: UNASSIGNED_COLOR }}>
-                              Unassigned
-                            </Badge>
-                          ) : (
-                            <div className="flex flex-wrap gap-1">
-                              {h.strategyAssignments.map((sa) => (
-                                <Badge
-                                  key={sa.id}
-                                  variant="outline"
-                                  className="font-normal"
-                                  style={{ color: getStrategyColor(sa.strategy, strategies), borderColor: getStrategyColor(sa.strategy, strategies) }}
+                          <div className="flex flex-wrap items-center gap-1">
+                            {h.strategyAssignments.length === 0 && (
+                              <Badge variant="outline" className="font-normal" style={{ color: UNASSIGNED_COLOR, borderColor: UNASSIGNED_COLOR }}>
+                                Unassigned
+                              </Badge>
+                            )}
+                            {h.strategyAssignments.map((sa) => (
+                              <Badge
+                                key={sa.id}
+                                variant="outline"
+                                className="font-normal pr-1 flex items-center gap-0.5"
+                                style={{ color: getStrategyColor(sa.strategy, strategies), borderColor: getStrategyColor(sa.strategy, strategies) }}
+                              >
+                                {sa.strategy}
+                                <button
+                                  type="button"
+                                  onClick={() => handleUnassign(sa.id)}
+                                  aria-label={`Remove ${h.trading_symbol} from ${sa.strategy}`}
+                                  className="rounded hover:bg-black/10 p-0.5 ml-0.5"
                                 >
-                                  {sa.strategy}
-                                </Badge>
-                              ))}
-                            </div>
-                          )}
+                                  <X className="h-2.5 w-2.5" />
+                                </button>
+                              </Badge>
+                            ))}
+                            {strategies.filter((s) => !h.strategyAssignments.some((sa) => sa.strategy === s)).length > 0 && (
+                              <select
+                                value=""
+                                disabled={isSavingStrategy}
+                                onChange={(e) => { if (e.target.value) handleAssignToStrategy(h.trading_symbol, e.target.value); e.target.value = ''; }}
+                                className="text-[10px] border rounded px-1 py-0.5 bg-white text-slate-500 outline-none cursor-pointer disabled:opacity-60"
+                              >
+                                <option value="">+ Add</option>
+                                {strategies
+                                  .filter((s) => !h.strategyAssignments.some((sa) => sa.strategy === s))
+                                  .map((s) => (
+                                    <option key={s} value={s}>{s}</option>
+                                  ))}
+                              </select>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell className="text-right">{h.quantity}</TableCell>
                         <TableCell className="text-right">₹{h.average_price.toFixed(2)}</TableCell>
@@ -755,6 +814,15 @@ function PaytmPortfolioContent() {
               <div>
                 <CardTitle className="flex items-center gap-2 text-base"><Layers className="h-4 w-4" />Strategy Allocation</CardTitle>
                 <CardDescription>Drag a holding out of Unassigned onto a strategy to categorize it — one asset can belong to more than one strategy</CardDescription>
+                {!isLoadingStrategies && (
+                  <p className="text-xxs text-muted-foreground mt-1">
+                    {assignments.length > 0 ? (
+                      <>Loaded {strategies.length} saved {strategies.length === 1 ? 'strategy' : 'strategies'} and {assignments.filter((a) => a.symbol).length} mapping{assignments.filter((a) => a.symbol).length === 1 ? '' : 's'} from the "Strategy" sheet.</>
+                    ) : (
+                      <>No saved allocation found in the "Strategy" sheet yet — add a strategy below to get started.</>
+                    )}
+                  </p>
+                )}
               </div>
               <CollapseToggle isOpen={isStrategySectionOpen} onToggle={() => setIsStrategySectionOpen((o) => !o)} label="Strategy Allocation" />
             </div>
@@ -789,23 +857,36 @@ function PaytmPortfolioContent() {
                   className={`rounded-lg border-2 border-dashed overflow-hidden bg-slate-50/60 flex flex-col transition-colors ${dragOverTarget === '' ? 'border-slate-400 bg-slate-100' : 'border-slate-300'}`}
                 >
                   <div className="px-4 py-2.5 bg-slate-200 text-slate-700 font-semibold text-sm flex items-center justify-between">
-                    <span>Unassigned</span>
+                    <span className="flex items-center gap-2">
+                      Unassigned
+                      {unassignedHoldings.some((h) => newlyDiscoveredSymbols.has(h.trading_symbol)) && (
+                        <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide" style={{ color: NEW_HOLDING_COLOR }}>
+                          <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: NEW_HOLDING_COLOR }} />
+                          New holdings
+                        </span>
+                      )}
+                    </span>
                     <span className="text-xs font-normal">{unassignedHoldings.length} holdings</span>
                   </div>
                   <div className="p-3 flex flex-wrap gap-2 min-h-[120px] flex-1">
                     {unassignedHoldings.length === 0 ? (
                       <p className="text-xxs text-muted-foreground italic">All holdings are categorized.</p>
                     ) : (
-                      unassignedHoldings.map((h) => (
-                        <div
-                          key={h.trading_symbol}
-                          draggable
-                          onDragStart={(e) => handleChipDragStart(e, { symbol: h.trading_symbol, assignmentId: null, sourceStrategy: null })}
-                          className="px-2.5 py-1.5 rounded-md bg-white border text-xs font-semibold cursor-grab active:cursor-grabbing shadow-sm select-none"
-                        >
-                          {h.trading_symbol}
-                        </div>
-                      ))
+                      unassignedHoldings.map((h) => {
+                        const isNew = newlyDiscoveredSymbols.has(h.trading_symbol);
+                        return (
+                          <div
+                            key={h.trading_symbol}
+                            draggable
+                            onDragStart={(e) => handleChipDragStart(e, { symbol: h.trading_symbol, assignmentId: null, sourceStrategy: null })}
+                            className="px-2.5 py-1.5 rounded-md border text-xs font-semibold cursor-grab active:cursor-grabbing shadow-sm select-none flex items-center gap-1.5"
+                            style={isNew ? { backgroundColor: '#FFFBEB', borderColor: NEW_HOLDING_COLOR, color: '#92400E' } : { backgroundColor: 'white' }}
+                          >
+                            {isNew && <span className="h-1.5 w-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: NEW_HOLDING_COLOR }} />}
+                            {h.trading_symbol}
+                          </div>
+                        );
+                      })
                     )}
                   </div>
                 </div>
