@@ -1076,3 +1076,153 @@ export async function deleteNote(noteId: string): Promise<void> {
         }
     });
 }
+
+// --- PORTFOLIO STRATEGY ALLOCATION ---
+// Used by the Paytm Money Portfolio page to remember which "strategy" (e.g.
+// Coffee Can, Magic Formula, Dividend Income) each holding has been dragged
+// into. Lives in the existing "Strategy" tab of the same shared spreadsheet.
+//
+// Each row is either:
+//   - a strategy DEFINITION: symbol is blank, strategy names a bucket the
+//     user created (so it shows up even before anything is dropped into it)
+//   - a strategy ASSIGNMENT: symbol + strategy pairs a holding to a bucket.
+// A symbol can appear in multiple rows against different strategies, so one
+// asset can belong to more than one strategy at the same time (many-to-many).
+// Columns (row 1 = header): id, symbol, strategy, date
+
+export interface StrategyAssignment {
+  id: string;
+  symbol: string; // '' means this row only declares the strategy, no holding assigned yet
+  strategy: string;
+  date: string;
+}
+
+function parseStrategyRows(rows: any[][] | null | undefined): StrategyAssignment[] {
+    if (!rows || rows.length <= 1) {
+        return [];
+    }
+
+    const headers = rows[0];
+    const idIndex = headers.indexOf('id');
+    const symbolIndex = headers.indexOf('symbol');
+    const strategyIndex = headers.indexOf('strategy');
+    const dateIndex = headers.indexOf('date');
+
+    return rows.slice(1).map((row, index): StrategyAssignment | null => {
+        if (row.every((cell) => !cell)) return null;
+
+        const strategy = (row[strategyIndex] || '').toString().trim();
+        if (!strategy) return null; // every row must at least name a strategy
+
+        return {
+            id: row[idIndex] || (new Date().getTime() + index).toString(),
+            symbol: (row[symbolIndex] || '').toString().trim(),
+            strategy,
+            date: row[dateIndex] || '',
+        };
+    }).filter((e): e is StrategyAssignment => e !== null);
+}
+
+export async function getStrategyAssignments(): Promise<StrategyAssignment[]> {
+    try {
+        const sheets = await getSheets();
+        const sheetId = getSheetId();
+
+        if (!sheetId) return [];
+
+        const range = 'Strategy';
+        await ensureSheetExists(sheets, sheetId, range, ['id', 'symbol', 'strategy', 'date']);
+
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: sheetId,
+            range: `${range}!A:D`,
+        });
+
+        return parseStrategyRows(response.data.values);
+    } catch (error) {
+        console.error('Error fetching strategy assignments:', error);
+        return [];
+    }
+}
+
+export async function addStrategyAssignment(data: { symbol: string; strategy: string }): Promise<StrategyAssignment> {
+    const sheets = await getSheets();
+    const sheetId = getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
+    const range = 'Strategy';
+    await ensureSheetExists(sheets, sheetId, range, ['id', 'symbol', 'strategy', 'date']);
+
+    const response = await sheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range: `${range}!A:A`,
+    });
+
+    const existingIds = response.data.values ? response.data.values.flat().map((id) => parseInt(id, 10)).filter((id) => !isNaN(id)) : [];
+    const maxId = existingIds.length > 0 ? Math.max(0, ...existingIds) : 0;
+    const newId = maxId + 1;
+
+    const newAssignment: StrategyAssignment = {
+        id: newId.toString(),
+        symbol: data.symbol.trim(),
+        strategy: data.strategy.trim(),
+        date: new Date().toISOString(),
+    };
+    const newRow = [newAssignment.id, newAssignment.symbol, newAssignment.strategy, newAssignment.date];
+
+    await sheets.spreadsheets.values.append({
+        spreadsheetId: sheetId,
+        range: range,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+            values: [newRow],
+        },
+    });
+
+    return newAssignment;
+}
+
+export async function deleteStrategyAssignment(id: string): Promise<void> {
+    const sheets = await getSheets();
+    const sheetId = getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
+    const range = 'Strategy';
+    const found = await findRowById(sheets, sheetId, range, id);
+
+    if (found === null) {
+        throw new Error('Strategy assignment not found to delete');
+    }
+
+    const { rowIndex } = found;
+    const targetSheetId = await getSheetIdByName(sheets, sheetId, range);
+
+    if (targetSheetId === undefined) {
+        throw new Error(`Could not find sheet ID for "${range}" to delete row.`);
+    }
+
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: sheetId,
+        requestBody: {
+            requests: [
+                {
+                    deleteDimension: {
+                        range: {
+                            sheetId: targetSheetId,
+                            dimension: 'ROWS',
+                            startIndex: rowIndex - 1,
+                            endIndex: rowIndex,
+                        }
+                    }
+                }
+            ]
+        }
+    });
+}
+
