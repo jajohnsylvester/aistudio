@@ -1089,12 +1089,16 @@ export async function deleteNote(noteId: string): Promise<void> {
 // A symbol can appear in multiple rows against different strategies, so one
 // asset can belong to more than one strategy at the same time (many-to-many).
 //
-// Column layout is auto-detected (case-insensitively) from row 1 so this
-// works whether the tab was created by this app (id, symbol, strategy, date)
-// or was already populated by hand with a different column order/casing —
-// as long as "symbol" and "strategy" headers exist somewhere in row 1. If no
-// "id" column is found, each row's physical sheet row number is used as its
-// stable id instead (so existing data can still be read/edited/deleted).
+// IMPORTANT: this tab has no reliable header row in practice — some rows
+// were written with the real values landing in different columns than
+// others. Rather than trust fixed column positions (which is what broke
+// this earlier), each row is parsed by CONTENT: the cell that looks like an
+// ISO timestamp is the date, a lone small integer is an old id/type marker
+// (ignored for display), and of what's left, the earlier column is the
+// symbol and the later one is the strategy — matching every row shape this
+// app has ever written, regardless of exactly which columns they landed in.
+// New rows are written in a fixed, simple [symbol, strategy, date] shape
+// going forward so this can't drift again.
 
 export interface StrategyAssignment {
   id: string;
@@ -1103,58 +1107,75 @@ export interface StrategyAssignment {
   date: string;
 }
 
-const DEFAULT_STRATEGY_HEADERS = ['id', 'symbol', 'strategy', 'date'];
+const DEFAULT_STRATEGY_HEADERS = ['symbol', 'strategy', 'date'];
+const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const HEADER_WORDS = ['id', 'symbol', 'strategy', 'date'];
 
-interface StrategyLayout {
-  idIndex: number;       // -1 if no explicit id column exists
-  symbolIndex: number;
-  strategyIndex: number;
-  dateIndex: number;     // -1 if no date column exists
-  columnCount: number;
-}
-
-function resolveStrategyLayout(headerRow: any[] | null | undefined): StrategyLayout {
-    const headers = (headerRow || []).map((h) => (h || '').toString().trim().toLowerCase());
-    const idIndex = headers.indexOf('id');
-    const symbolIndex = headers.indexOf('symbol');
-    const strategyIndex = headers.indexOf('strategy');
-    const dateIndex = headers.indexOf('date');
-
-    return {
-        idIndex,
-        // Fall back to the app's default column positions (B=symbol, C=strategy,
-        // D=date) if a header row exists but doesn't literally say "symbol"/"strategy".
-        symbolIndex: symbolIndex !== -1 ? symbolIndex : 1,
-        strategyIndex: strategyIndex !== -1 ? strategyIndex : 2,
-        dateIndex,
-        columnCount: Math.max(headers.length, 4),
-    };
+function looksLikeHeaderRow(values: string[]): boolean {
+    return values.length > 0 && values.every((v) => HEADER_WORDS.includes(v.toLowerCase()));
 }
 
 function parseStrategyRows(rows: any[][] | null | undefined): StrategyAssignment[] {
-    if (!rows || rows.length <= 1) {
-        return [];
-    }
+    if (!rows || rows.length === 0) return [];
 
-    const layout = resolveStrategyLayout(rows[0]);
-    const dataRows = rows.slice(1);
+    const assignments: StrategyAssignment[] = [];
 
-    return dataRows.map((row, index): StrategyAssignment | null => {
-        if (!row || row.every((cell) => !cell)) return null;
+    rows.forEach((row, rowIdx) => {
+        if (!row) return;
+        const physicalRow = rowIdx + 1; // 1-based physical sheet row number
 
-        const strategy = (row[layout.strategyIndex] || '').toString().trim();
-        if (!strategy) return null; // every row must at least name a strategy
+        const cells = row
+            .map((cell, colIdx) => ({ value: (cell ?? '').toString().trim(), colIdx }))
+            .filter((c) => c.value !== '');
 
-        const explicitId = layout.idIndex !== -1 ? (row[layout.idIndex] || '').toString().trim() : '';
-        const physicalRow = index + 2; // +1 for the header row, +1 for 1-based row numbers
+        if (cells.length === 0) return;
+        if (looksLikeHeaderRow(cells.map((c) => c.value))) return; // skip an actual header row, if present
 
-        return {
-            id: explicitId || `row-${physicalRow}`,
-            symbol: (row[layout.symbolIndex] || '').toString().trim(),
+        // Pull out the date cell (the one that parses as an ISO timestamp).
+        let dateCell: { value: string; colIdx: number } | null = null;
+        const afterDate: typeof cells = [];
+        for (const c of cells) {
+            if (!dateCell && ISO_DATE_REGEX.test(c.value)) {
+                dateCell = c;
+            } else {
+                afterDate.push(c);
+            }
+        }
+
+        // Pull out a bare small-integer id/type marker left over from older
+        // row shapes (not needed for display — a fresh id is derived below).
+        let markerCell: { value: string; colIdx: number } | null = null;
+        const textCells: typeof cells = [];
+        for (const c of afterDate) {
+            if (!markerCell && /^\d{1,6}$/.test(c.value)) {
+                markerCell = c;
+            } else {
+                textCells.push(c);
+            }
+        }
+
+        textCells.sort((a, b) => a.colIdx - b.colIdx);
+
+        let symbol = '';
+        let strategy = '';
+        if (textCells.length >= 2) {
+            symbol = textCells[0].value;
+            strategy = textCells[textCells.length - 1].value;
+        } else if (textCells.length === 1) {
+            strategy = textCells[0].value;
+        }
+
+        if (!strategy) return; // every row must at least name a strategy
+
+        assignments.push({
+            id: `row-${physicalRow}`,
+            symbol,
             strategy,
-            date: layout.dateIndex !== -1 ? (row[layout.dateIndex] || '').toString() : '',
-        };
-    }).filter((e): e is StrategyAssignment => e !== null);
+            date: dateCell ? dateCell.value : '',
+        });
+    });
+
+    return assignments;
 }
 
 export async function getStrategyAssignments(): Promise<StrategyAssignment[]> {
@@ -1181,27 +1202,6 @@ export async function getStrategyAssignments(): Promise<StrategyAssignment[]> {
     }
 }
 
-async function locateStrategyRow(sheets: any, sheetId: string, id: string): Promise<number | null> {
-    if (id.startsWith('row-')) {
-        const rowNum = parseInt(id.slice(4), 10);
-        return isNaN(rowNum) ? null : rowNum;
-    }
-
-    const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: sheetId,
-        range: 'Strategy!A:Z',
-    });
-    const rows = response.data.values;
-    if (!rows || rows.length <= 1) return null;
-
-    const layout = resolveStrategyLayout(rows[0]);
-    if (layout.idIndex === -1) return null;
-
-    const dataRows = rows.slice(1);
-    const foundIndex = dataRows.findIndex((row: any[]) => (row[layout.idIndex] || '').toString().trim() === id);
-    return foundIndex === -1 ? null : foundIndex + 2;
-}
-
 export async function addStrategyAssignment(data: { symbol: string; strategy: string }): Promise<StrategyAssignment> {
     const sheets = await getSheets();
     const sheetId = getSheetId();
@@ -1213,57 +1213,30 @@ export async function addStrategyAssignment(data: { symbol: string; strategy: st
     const range = 'Strategy';
     await ensureSheetExists(sheets, sheetId, range, DEFAULT_STRATEGY_HEADERS);
 
-    const headerResponse = await sheets.spreadsheets.values.get({
-        spreadsheetId: sheetId,
-        range: `${range}!1:1`,
-    });
-    const layout = resolveStrategyLayout(headerResponse.data.values?.[0]);
-
+    const symbol = data.symbol.trim();
+    const strategy = data.strategy.trim();
     const date = new Date().toISOString();
-    const newRow: string[] = new Array(layout.columnCount).fill('');
-    newRow[layout.symbolIndex] = data.symbol.trim();
-    newRow[layout.strategyIndex] = data.strategy.trim();
-    if (layout.dateIndex !== -1) newRow[layout.dateIndex] = date;
 
-    let assignedId = '';
-    if (layout.idIndex !== -1) {
-        // Keep ids sequential if the existing sheet already uses numeric ids.
-        const idColLetter = String.fromCharCode(65 + layout.idIndex);
-        const idColResponse = await sheets.spreadsheets.values.get({
-            spreadsheetId: sheetId,
-            range: `${range}!${idColLetter}2:${idColLetter}`,
-        });
-        const existingIds = (idColResponse.data.values || [])
-            .flat()
-            .map((v: string) => parseInt(v, 10))
-            .filter((v: number) => !isNaN(v));
-        const nextId = (existingIds.length > 0 ? Math.max(...existingIds) : 0) + 1;
-        assignedId = nextId.toString();
-        newRow[layout.idIndex] = assignedId;
-    }
+    // Total rows used anywhere in the sheet (any column), so the new row's
+    // physical position — and therefore its id — is predictable regardless
+    // of which columns older rows happen to have data in.
+    const countResponse = await sheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range: `${range}!A:Z`,
+    });
+    const totalRows = countResponse.data.values?.length || 0;
+    const physicalRow = totalRows + 1;
 
     await sheets.spreadsheets.values.append({
         spreadsheetId: sheetId,
         range: range,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
-            values: [newRow],
+            values: [[symbol, strategy, date]],
         },
     });
 
-    if (assignedId) {
-        return { id: assignedId, symbol: data.symbol.trim(), strategy: data.strategy.trim(), date };
-    }
-
-    // No id column in this sheet — derive the synthetic id from the row
-    // number the new entry landed on (matches the `row-N` scheme used when
-    // reading rows back in parseStrategyRows).
-    const countResponse = await sheets.spreadsheets.values.get({
-        spreadsheetId: sheetId,
-        range: `${range}!A:A`,
-    });
-    const totalRows = countResponse.data.values?.length || 1;
-    return { id: `row-${totalRows}`, symbol: data.symbol.trim(), strategy: data.strategy.trim(), date };
+    return { id: `row-${physicalRow}`, symbol, strategy, date };
 }
 
 export async function deleteStrategyAssignment(id: string): Promise<void> {
@@ -1274,13 +1247,14 @@ export async function deleteStrategyAssignment(id: string): Promise<void> {
       throw new Error('Google Sheets Sheet ID not configured');
     }
 
-    const range = 'Strategy';
-    const physicalRow = await locateStrategyRow(sheets, sheetId, id);
+    const match = id.match(/-(\d+)$/);
+    const physicalRow = match ? parseInt(match[1], 10) : NaN;
 
-    if (physicalRow === null) {
+    if (isNaN(physicalRow)) {
         throw new Error('Strategy assignment not found to delete');
     }
 
+    const range = 'Strategy';
     const targetSheetId = await getSheetIdByName(sheets, sheetId, range);
     if (targetSheetId === undefined) {
         throw new Error(`Could not find sheet ID for "${range}" to delete row.`);
