@@ -1101,3 +1101,4 @@ function PaytmPortfolioContent() {
 export default function PaytmPortfolioPage() {
   return <Suspense fallback={<div className="p-8"><Loader2 className="animate-spin text-primary mx-auto h-8 w-8" /></div>}><PaytmPortfolioContent /></Suspense>;
 }
+
