@@ -387,7 +387,11 @@ function PaytmPortfolioContent() {
     setIsSavingStrategy(true);
     try {
       await deleteStrategyAssignment(assignmentId);
-      setAssignments((prev) => prev.filter((a) => a.id !== assignmentId));
+      // Row-based ids shift for everything below the deleted row, so a full
+      // refetch (rather than an optimistic local filter) keeps every
+      // remaining assignment's id correctly pointed at its real sheet row.
+      const fresh = await getStrategyAssignments();
+      setAssignments(fresh);
     } catch (error: any) {
       toast({ variant: 'destructive', title: 'Failed to remove assignment', description: error.message });
     } finally {
