@@ -54,6 +54,13 @@ interface Holding {
   current_value: number;
   investment_value: number;
   sector: string;
+  // Computed server-side (in the API route) against the live Strategy
+  // sheet as soon as the Paytm response comes in. Optional so the client
+  // still works, via the fallback logic below, against an older/cached
+  // response that predates this enrichment.
+  display_symbol?: string;
+  is_synthetic_symbol?: boolean;
+  is_new_holding?: boolean;
 }
 
 interface SectorBreakdownEntry {
@@ -77,6 +84,7 @@ interface PortfolioData {
   paytmApiTimestamp?: string;
   jwtMeta?: JwtMetadata | null;
   sectorBreakdown?: SectorBreakdownEntry[];
+  newHoldingsCount?: number;
 }
 
 interface DragPayload {
@@ -85,11 +93,24 @@ interface DragPayload {
   sourceStrategy: string | null;
 }
 
+// A holding as it appears in the UI once we've resolved its identity: every
+// holding needs a stable, unique, human-readable symbol to key off of for
+// drag & drop, strategy assignment, and "is this new" checks. Paytm returns
+// "NA" (or blank) as trading_symbol for several instrument types — mostly
+// bonds — so several holdings can share the literal string "NA". Using that
+// raw value as an identity key is what caused the Unassigned pool to fill up
+// with indistinguishable "NA" chips (see assignDisplaySymbols below).
+interface HoldingWithStrategy extends Holding {
+  displaySymbol: string;
+  isSyntheticSymbol: boolean;
+  strategyAssignments: { id: string; strategy: string }[];
+}
+
 const SECTOR_COLORS = ['#3B82F6', '#F59E0B', '#10B981', '#8B5CF6', '#EF4444', '#06B6D4', '#EC4899', '#84CC16'];
 const STRATEGY_COLORS = ['#2563EB', '#059669', '#F59E0B', '#7C3AED', '#DC2626', '#0891B2', '#DB2777', '#65A30D'];
 const UNASSIGNED_COLOR = '#94A3B8';
 const NEW_HOLDING_COLOR = '#D97706';
-const KNOWN_SYMBOLS_STORAGE_KEY = 'paytm_portfolio_known_symbols';
+const UNASSIGNED_FILTER_VALUE = '__unassigned__';
 
 function getStrategyColor(strategy: string, strategies: string[]): string {
   const idx = strategies.indexOf(strategy);
@@ -98,6 +119,62 @@ function getStrategyColor(strategy: string, strategies: string[]): string {
 
 function formatINR(value: number): string {
   return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+// --- Synthetic symbol assignment for symbol-less holdings (e.g. bonds) ---
+//
+// Paytm Money's API reports trading_symbol as "NA" (sometimes blank/"-")
+// for instruments that don't trade under a ticker, chiefly bonds. Treating
+// that literal string as the holding's identity broke two things at once:
+// every "NA" holding collapsed onto the same React key / map entry, and
+// assigning ONE of them to a strategy silently "assigned" all of them,
+// while the rest kept re-appearing in Unassigned as duplicate "NA" chips.
+//
+// The fix: give every symbol-less holding a stable, unique display name
+// (Bond1, Bond2, Bond3, ... — or "<Sector>1" for other symbol-less sectors)
+// and use THAT for every identity-sensitive operation (keys, drag payloads,
+// Strategy-sheet lookups). Numbering is derived from a deterministic sort
+// (avg price, then quantity, then invested value) rather than array index,
+// so the same underlying bond gets the same synthetic name across refetches
+// even if Paytm returns holdings in a different order next time.
+function isMissingSymbol(symbol: string | null | undefined): boolean {
+  if (!symbol) return true;
+  const s = symbol.trim().toUpperCase();
+  return s === '' || s === 'NA' || s === 'N/A' || s === '-' || s === 'NULL';
+}
+
+function syntheticPrefix(sector: string | null | undefined): string {
+  const word = (sector || '').trim().split(/\s+/)[0] || 'Asset';
+  // Very small heuristic to singularize "Bonds" -> "Bond" etc.
+  return word.length > 3 && word.toLowerCase().endsWith('s') ? word.slice(0, -1) : word;
+}
+
+function assignDisplaySymbols(holdings: Holding[]): { displaySymbol: string; isSynthetic: boolean }[] {
+  const groups = new Map<string, number[]>();
+  holdings.forEach((h, idx) => {
+    if (isMissingSymbol(h.trading_symbol)) {
+      const key = syntheticPrefix(h.sector);
+      const list = groups.get(key) || [];
+      list.push(idx);
+      groups.set(key, list);
+    }
+  });
+
+  const result = holdings.map((h) => ({ displaySymbol: h.trading_symbol, isSynthetic: false }));
+
+  groups.forEach((indices, prefix) => {
+    const sorted = [...indices].sort((a, b) => {
+      const ha = holdings[a], hb = holdings[b];
+      if (ha.average_price !== hb.average_price) return ha.average_price - hb.average_price;
+      if (ha.quantity !== hb.quantity) return ha.quantity - hb.quantity;
+      return ha.investment_value - hb.investment_value;
+    });
+    sorted.forEach((idx, i) => {
+      result[idx] = { displaySymbol: `${prefix}${i + 1}`, isSynthetic: true };
+    });
+  });
+
+  return result;
 }
 
 function SectorDiversificationChart({ data }: { data: SectorBreakdownEntry[] }) {
@@ -203,7 +280,11 @@ function PaytmPortfolioContent() {
   const [isSavingStrategy, setIsSavingStrategy] = useState<boolean>(false);
   const [newStrategyName, setNewStrategyName] = useState<string>('');
   const [dragOverTarget, setDragOverTarget] = useState<string | null>(null); // '' = Unassigned pool, else strategy name
-  const [newlyDiscoveredSymbols, setNewlyDiscoveredSymbols] = useState<Set<string>>(new Set());
+
+  // Asset Holdings Detail filters
+  const [filterSymbol, setFilterSymbol] = useState<string>('');
+  const [filterSector, setFilterSector] = useState<string>('');
+  const [filterStrategy, setFilterStrategy] = useState<string>('');
 
   const { toast } = useToast();
 
@@ -251,31 +332,6 @@ function PaytmPortfolioContent() {
       } else {
         setPortfolio(data);
         setSecondsUntilNextRefresh(refreshInterval);
-
-        // Diff the freshly-fetched holdings against symbols we've seen
-        // before (persisted in localStorage) so genuinely new holdings can
-        // be highlighted in the Unassigned bucket. The highlight itself is
-        // kept in component state so it survives the localStorage write
-        // below for the rest of this session, instead of disappearing
-        // the instant we record it as "known".
-        try {
-          const stored = typeof window !== 'undefined' ? window.localStorage.getItem(KNOWN_SYMBOLS_STORAGE_KEY) : null;
-          const known: string[] = stored ? JSON.parse(stored) : [];
-          const knownSet = new Set(known);
-          const currentSymbols: string[] = (data.holdings || []).map((h: Holding) => h.trading_symbol);
-          const freshlyNew = currentSymbols.filter((sym) => !knownSet.has(sym));
-
-          if (freshlyNew.length > 0) {
-            setNewlyDiscoveredSymbols((prev) => new Set([...prev, ...freshlyNew]));
-          }
-
-          const mergedKnown = Array.from(new Set([...known, ...currentSymbols]));
-          if (typeof window !== 'undefined') {
-            window.localStorage.setItem(KNOWN_SYMBOLS_STORAGE_KEY, JSON.stringify(mergedKnown));
-          }
-        } catch {
-          // localStorage unavailable (e.g. private browsing) — skip "new holding" highlighting
-        }
       }
     } catch (error: any) {
       setPortfolioError(error.message);
@@ -317,18 +373,60 @@ function PaytmPortfolioContent() {
     return map;
   }, [assignments]);
 
-  const holdingsWithStrategy = useMemo(() => {
+  // trading_symbol is "NA"/blank for several instrument types (chiefly
+  // bonds), so identity for drag & drop / strategy lookups is resolved
+  // through a synthetic, stable displaySymbol instead of the raw field —
+  // see assignDisplaySymbols for why this matters.
+  const holdingsWithStrategy = useMemo<HoldingWithStrategy[]>(() => {
     if (!portfolio) return [];
-    return portfolio.holdings.map((h) => ({
-      ...h,
-      strategyAssignments: symbolAssignmentsMap.get(h.trading_symbol) || [],
-    }));
+    // The API route now resolves display_symbol/is_synthetic_symbol itself
+    // (checked against the live Strategy sheet at fetch time). This local
+    // fallback only kicks in for a response that predates that change.
+    const fallbackResolved = assignDisplaySymbols(portfolio.holdings);
+    return portfolio.holdings.map((h, idx) => {
+      const displaySymbol = h.display_symbol ?? fallbackResolved[idx].displaySymbol;
+      const isSyntheticSymbol = h.is_synthetic_symbol ?? fallbackResolved[idx].isSynthetic;
+      return {
+        ...h,
+        displaySymbol,
+        isSyntheticSymbol,
+        strategyAssignments: symbolAssignmentsMap.get(displaySymbol) || [],
+      };
+    });
   }, [portfolio, symbolAssignmentsMap]);
 
   const unassignedHoldings = useMemo(
     () => holdingsWithStrategy.filter((h) => h.strategyAssignments.length === 0),
     [holdingsWithStrategy]
   );
+
+  // "New" is decided primarily by the API route, which checks each display
+  // symbol against the Strategy sheet the moment the Paytm response comes
+  // in. We still cross-check against the client's own live copy of the
+  // sheet (knownSymbolsFromSheet) so the "NEW" badge disappears the instant
+  // the user drags a holding into a strategy during this session, instead
+  // of waiting for the next portfolio refetch.
+  const knownSymbolsFromSheet = useMemo(() => {
+    const set = new Set<string>();
+    assignments.forEach((a) => { if (a.symbol) set.add(a.symbol); });
+    return set;
+  }, [assignments]);
+
+  const newlyDiscoveredSymbols = useMemo(() => {
+    const set = new Set<string>();
+    holdingsWithStrategy.forEach((h) => {
+      const flaggedNewByServer = h.is_new_holding ?? true;
+      if (flaggedNewByServer && !knownSymbolsFromSheet.has(h.displaySymbol)) set.add(h.displaySymbol);
+    });
+    return set;
+  }, [holdingsWithStrategy, knownSymbolsFromSheet]);
+
+  const unassignedSummary = useMemo(() => {
+    const investmentValue = unassignedHoldings.reduce((s, h) => s + h.investment_value, 0);
+    const currentValue = unassignedHoldings.reduce((s, h) => s + h.current_value, 0);
+    const pnl = unassignedHoldings.reduce((s, h) => s + h.pnl, 0);
+    return { currentValue, pnl, pnlPercent: investmentValue > 0 ? (pnl / investmentValue) * 100 : 0 };
+  }, [unassignedHoldings]);
 
   const strategySummaries = useMemo(() => {
     return strategies.map((name) => {
@@ -346,6 +444,29 @@ function PaytmPortfolioContent() {
       };
     });
   }, [strategies, holdingsWithStrategy]);
+
+  // Asset Holdings Detail filters (symbol substring, sector, strategy)
+  const sectorOptions = useMemo(() => {
+    const set = new Set<string>();
+    holdingsWithStrategy.forEach((h) => { if (h.sector) set.add(h.sector); });
+    return Array.from(set).sort();
+  }, [holdingsWithStrategy]);
+
+  const filteredHoldings = useMemo(() => {
+    const symbolQuery = filterSymbol.trim().toLowerCase();
+    return holdingsWithStrategy.filter((h) => {
+      if (symbolQuery && !h.displaySymbol.toLowerCase().includes(symbolQuery) && !h.trading_symbol.toLowerCase().includes(symbolQuery)) {
+        return false;
+      }
+      if (filterSector && h.sector !== filterSector) return false;
+      if (filterStrategy === UNASSIGNED_FILTER_VALUE) {
+        if (h.strategyAssignments.length > 0) return false;
+      } else if (filterStrategy) {
+        if (!h.strategyAssignments.some((sa) => sa.strategy === filterStrategy)) return false;
+      }
+      return true;
+    });
+  }, [holdingsWithStrategy, filterSymbol, filterSector, filterStrategy]);
 
   // --- Strategy allocation handlers ---
 
@@ -649,8 +770,8 @@ function PaytmPortfolioContent() {
 
       {/* --- Asset Holdings Detail + Sector Diversification Matrix (moved to top) --- */}
       {portfolio && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <Card className="lg:col-span-2">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+          <Card className="lg:col-span-2 flex flex-col">
             <CardHeader
               className="pb-2 cursor-pointer select-none"
               onClick={() => setIsHoldingsSectionOpen((o) => !o)}
@@ -664,7 +785,7 @@ function PaytmPortfolioContent() {
               </div>
             </CardHeader>
             {isHoldingsSectionOpen && (
-            <CardContent>
+            <CardContent className="flex-1 flex flex-col min-h-0">
               <div className="flex gap-2 mb-4">
                 {portfolio.source && <Badge variant="outline">{portfolio.source}</Badge>}
                 {portfolio.agentModel && <Badge variant="secondary">{portfolio.agentModel}</Badge>}
@@ -677,7 +798,51 @@ function PaytmPortfolioContent() {
                 </div>
               )}
 
-              <ScrollArea className="h-[350px]">
+              {/* Filters */}
+              <div className="flex flex-wrap items-center gap-2 mb-3">
+                <input
+                  type="text"
+                  value={filterSymbol}
+                  onChange={(e) => setFilterSymbol(e.target.value)}
+                  placeholder="Filter by symbol…"
+                  className="text-xs p-1.5 border rounded-md outline-none min-w-[140px]"
+                />
+                <select
+                  value={filterSector}
+                  onChange={(e) => setFilterSector(e.target.value)}
+                  className="text-xs p-1.5 border rounded-md outline-none bg-white"
+                >
+                  <option value="">All sectors</option>
+                  {sectorOptions.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+                <select
+                  value={filterStrategy}
+                  onChange={(e) => setFilterStrategy(e.target.value)}
+                  className="text-xs p-1.5 border rounded-md outline-none bg-white"
+                >
+                  <option value="">All strategies</option>
+                  <option value={UNASSIGNED_FILTER_VALUE}>Unassigned</option>
+                  {strategies.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+                {(filterSymbol || filterSector || filterStrategy) && (
+                  <button
+                    type="button"
+                    onClick={() => { setFilterSymbol(''); setFilterSector(''); setFilterStrategy(''); }}
+                    className="text-xs text-slate-500 hover:text-slate-700 underline"
+                  >
+                    Clear filters
+                  </button>
+                )}
+                <span className="text-xxs text-muted-foreground ml-auto">
+                  Showing {filteredHoldings.length} of {holdingsWithStrategy.length}
+                </span>
+              </div>
+
+              <ScrollArea className="flex-1 min-h-[220px]">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -691,12 +856,24 @@ function PaytmPortfolioContent() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {holdingsWithStrategy.map((h, i) => (
-                      <TableRow key={i}>
+                    {filteredHoldings.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={7} className="text-center text-xs text-muted-foreground italic py-6">
+                          No holdings match the current filters.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      filteredHoldings.map((h) => (
+                      <TableRow key={h.displaySymbol}>
                         <TableCell className="font-semibold">
                           <span className="flex items-center gap-1.5">
-                            {h.trading_symbol}
-                            {newlyDiscoveredSymbols.has(h.trading_symbol) && (
+                            {h.displaySymbol}
+                            {h.isSyntheticSymbol && (
+                              <span className="text-xxs font-normal text-slate-400" title={`Original symbol from Paytm: "${h.trading_symbol}"`}>
+                                (auto)
+                              </span>
+                            )}
+                            {newlyDiscoveredSymbols.has(h.displaySymbol) && (
                               <Badge className="font-semibold text-[9px] px-1.5 py-0" style={{ backgroundColor: NEW_HOLDING_COLOR, color: 'white' }}>
                                 NEW
                               </Badge>
@@ -722,7 +899,7 @@ function PaytmPortfolioContent() {
                                 <button
                                   type="button"
                                   onClick={() => handleUnassign(sa.id)}
-                                  aria-label={`Remove ${h.trading_symbol} from ${sa.strategy}`}
+                                  aria-label={`Remove ${h.displaySymbol} from ${sa.strategy}`}
                                   className="rounded hover:bg-black/10 p-0.5 ml-0.5"
                                 >
                                   <X className="h-2.5 w-2.5" />
@@ -733,7 +910,7 @@ function PaytmPortfolioContent() {
                               <select
                                 value=""
                                 disabled={isSavingStrategy}
-                                onChange={(e) => { if (e.target.value) handleAssignToStrategy(h.trading_symbol, e.target.value); e.target.value = ''; }}
+                                onChange={(e) => { if (e.target.value) handleAssignToStrategy(h.displaySymbol, e.target.value); e.target.value = ''; }}
                                 className="text-[10px] border rounded px-1 py-0.5 bg-white text-slate-500 outline-none cursor-pointer disabled:opacity-60"
                               >
                                 <option value="">+ Add</option>
@@ -753,7 +930,8 @@ function PaytmPortfolioContent() {
                           {formatINR(h.pnl)} ({h.pnl_percent.toFixed(2)}%)
                         </TableCell>
                       </TableRow>
-                    ))}
+                      ))
+                    )}
                   </TableBody>
                 </Table>
               </ScrollArea>
@@ -863,7 +1041,7 @@ function PaytmPortfolioContent() {
                   <div className="px-4 py-2.5 bg-slate-200 text-slate-700 font-semibold text-sm flex items-center justify-between">
                     <span className="flex items-center gap-2">
                       Unassigned
-                      {unassignedHoldings.some((h) => newlyDiscoveredSymbols.has(h.trading_symbol)) && (
+                      {unassignedHoldings.some((h) => newlyDiscoveredSymbols.has(h.displaySymbol)) && (
                         <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide" style={{ color: NEW_HOLDING_COLOR }}>
                           <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: NEW_HOLDING_COLOR }} />
                           New holdings
@@ -872,22 +1050,37 @@ function PaytmPortfolioContent() {
                     </span>
                     <span className="text-xs font-normal">{unassignedHoldings.length} holdings</span>
                   </div>
+                  <div className="grid grid-cols-3 divide-x border-b bg-slate-100/60">
+                    <div className="px-2 py-2 text-center">
+                      <p className="text-xxs text-muted-foreground">Sum</p>
+                      <p className="text-xs font-bold tabular-nums">{formatINR(unassignedSummary.currentValue)}</p>
+                    </div>
+                    <div className="px-2 py-2 text-center">
+                      <p className="text-xxs text-muted-foreground">P&L</p>
+                      <p className={`text-xs font-bold tabular-nums ${unassignedSummary.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>{formatINR(unassignedSummary.pnl)}</p>
+                    </div>
+                    <div className="px-2 py-2 text-center">
+                      <p className="text-xxs text-muted-foreground">Return %</p>
+                      <p className={`text-xs font-bold tabular-nums ${unassignedSummary.pnlPercent >= 0 ? 'text-green-600' : 'text-red-600'}`}>{unassignedSummary.pnlPercent.toFixed(2)}%</p>
+                    </div>
+                  </div>
                   <div className="p-3 flex flex-wrap gap-2 min-h-[120px] flex-1">
                     {unassignedHoldings.length === 0 ? (
                       <p className="text-xxs text-muted-foreground italic">All holdings are categorized.</p>
                     ) : (
                       unassignedHoldings.map((h) => {
-                        const isNew = newlyDiscoveredSymbols.has(h.trading_symbol);
+                        const isNew = newlyDiscoveredSymbols.has(h.displaySymbol);
                         return (
                           <div
-                            key={h.trading_symbol}
+                            key={h.displaySymbol}
                             draggable
-                            onDragStart={(e) => handleChipDragStart(e, { symbol: h.trading_symbol, assignmentId: null, sourceStrategy: null })}
+                            onDragStart={(e) => handleChipDragStart(e, { symbol: h.displaySymbol, assignmentId: null, sourceStrategy: null })}
                             className="px-2.5 py-1.5 rounded-md border text-xs font-semibold cursor-grab active:cursor-grabbing shadow-sm select-none flex items-center gap-1.5"
                             style={isNew ? { backgroundColor: '#FFFBEB', borderColor: NEW_HOLDING_COLOR, color: '#92400E' } : { backgroundColor: 'white' }}
+                            title={h.isSyntheticSymbol ? `Original symbol from Paytm: "${h.trading_symbol}"` : undefined}
                           >
                             {isNew && <span className="h-1.5 w-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: NEW_HOLDING_COLOR }} />}
-                            {h.trading_symbol}
+                            {h.displaySymbol}
                           </div>
                         );
                       })
@@ -939,15 +1132,16 @@ function PaytmPortfolioContent() {
                                 <div
                                   key={assignment.id}
                                   draggable
-                                  onDragStart={(e) => handleChipDragStart(e, { symbol: h.trading_symbol, assignmentId: assignment.id, sourceStrategy: s.strategy })}
+                                  onDragStart={(e) => handleChipDragStart(e, { symbol: h.displaySymbol, assignmentId: assignment.id, sourceStrategy: s.strategy })}
                                   className="flex items-center gap-1 pl-2.5 pr-1.5 py-1.5 rounded-md text-white text-xs font-semibold cursor-grab active:cursor-grabbing shadow-sm select-none"
                                   style={{ backgroundColor: color }}
+                                  title={h.isSyntheticSymbol ? `Original symbol from Paytm: "${h.trading_symbol}"` : undefined}
                                 >
-                                  {h.trading_symbol}
+                                  {h.displaySymbol}
                                   <button
                                     type="button"
                                     onClick={() => handleUnassign(assignment.id)}
-                                    aria-label={`Remove ${h.trading_symbol} from ${s.strategy}`}
+                                    aria-label={`Remove ${h.displaySymbol} from ${s.strategy}`}
                                     className="ml-0.5 rounded hover:bg-black/20 p-0.5"
                                   >
                                     <X className="h-3 w-3" />
@@ -1105,4 +1299,5 @@ function PaytmPortfolioContent() {
 export default function PaytmPortfolioPage() {
   return <Suspense fallback={<div className="p-8"><Loader2 className="animate-spin text-primary mx-auto h-8 w-8" /></div>}><PaytmPortfolioContent /></Suspense>;
 }
+
 
