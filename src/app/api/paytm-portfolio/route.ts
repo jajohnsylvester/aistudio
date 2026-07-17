@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
+import { getStrategyAssignments } from '@/lib/sheets';
 import {
   PAYTM_LOGIN_URL, API_ROUTES, MCP_TOOLS,
   callPaytmAPI, logDebug, type Holding,
@@ -48,6 +49,83 @@ function computeSectorBreakdown(holdings: Holding[], totalCurrentValue: number):
   return Array.from(grouped.values())
     .map(entry => ({ ...entry, percent: totalCurrentValue > 0 ? (entry.currentValue / totalCurrentValue) * 100 : 0 }))
     .sort((a, b) => b.currentValue - a.currentValue);
+}
+
+// --- Synthetic identity for symbol-less holdings ------------------------
+// Paytm reports trading_symbol as "NA" (or leaves it blank/"Unknown") for
+// several instrument types, chiefly bonds, so multiple holdings can share
+// the exact same literal symbol. Anything keyed on that raw value —
+// including drag-and-drop identity on the client and the "is this a new
+// holding" check below — needs a stable, unique display symbol instead.
+// Numbering comes from a deterministic sort (avg price, then quantity,
+// then invested value) rather than array order, so the same underlying
+// bond gets the same synthetic name across separate calls to this endpoint
+// even if Paytm returns holdings in a different order next time.
+function isMissingSymbol(symbol: string | null | undefined): boolean {
+  if (!symbol) return true;
+  const s = symbol.trim().toUpperCase();
+  return s === '' || s === 'NA' || s === 'N/A' || s === '-' || s === 'NULL' || s === 'UNKNOWN';
+}
+
+function syntheticPrefix(sector: string | null | undefined): string {
+  const word = (sector || '').trim().split(/\s+/)[0] || 'Asset';
+  return word.length > 3 && word.toLowerCase().endsWith('s') ? word.slice(0, -1) : word;
+}
+
+interface EnrichedHolding extends Holding {
+  display_symbol: string;
+  is_synthetic_symbol: boolean;
+  is_new_holding: boolean;
+}
+
+function assignDisplaySymbols(holdings: Holding[]): { displaySymbol: string; isSynthetic: boolean }[] {
+  const groups = new Map<string, number[]>();
+  holdings.forEach((h, idx) => {
+    if (isMissingSymbol(h.trading_symbol)) {
+      const key = syntheticPrefix(h.sector);
+      const list = groups.get(key) || [];
+      list.push(idx);
+      groups.set(key, list);
+    }
+  });
+
+  const result = holdings.map((h) => ({ displaySymbol: h.trading_symbol, isSynthetic: false }));
+
+  groups.forEach((indices, prefix) => {
+    const sorted = [...indices].sort((a, b) => {
+      const ha = holdings[a], hb = holdings[b];
+      if (ha.average_price !== hb.average_price) return ha.average_price - hb.average_price;
+      if (ha.quantity !== hb.quantity) return ha.quantity - hb.quantity;
+      return ha.investment_value - hb.investment_value;
+    });
+    sorted.forEach((idx, i) => {
+      result[idx] = { displaySymbol: `${prefix}${i + 1}`, isSynthetic: true };
+    });
+  });
+
+  return result;
+}
+
+// Cross-checks each holding's display symbol against every symbol already
+// recorded in the "Strategy" Google Sheet (regardless of which strategy it
+// was assigned to). Anything absent from that sheet has never been seen or
+// categorized before, so it's flagged as a new holding right here, at the
+// point the Paytm response is processed — rather than inferred later on
+// the client. getStrategyAssignments() already swallows its own Sheets
+// errors and returns [], so a Sheets outage degrades to "nothing flagged
+// as new" instead of breaking the portfolio endpoint.
+async function enrichHoldings(holdings: Holding[]): Promise<EnrichedHolding[]> {
+  const resolved = assignDisplaySymbols(holdings);
+
+  const assignments = await getStrategyAssignments();
+  const knownSymbols = new Set(assignments.filter((a) => a.symbol).map((a) => a.symbol));
+
+  return holdings.map((h, idx) => ({
+    ...h,
+    display_symbol: resolved[idx].displaySymbol,
+    is_synthetic_symbol: resolved[idx].isSynthetic,
+    is_new_holding: !knownSymbols.has(resolved[idx].displaySymbol),
+  }));
 }
 
 function decodeJwtTimestamps(token: string) {
@@ -322,10 +400,24 @@ export async function GET(request: NextRequest) {
 
       const sectorBreakdown = computeSectorBreakdown(holdings, totalCurrentValue);
 
+      // Resolve stable display symbols for symbol-less holdings (bonds
+      // reported as "NA", etc.) and check each one against the live
+      // Strategy sheet so "new holding" status is determined right here,
+      // against the source of truth, rather than guessed on the client.
+      let enrichedHoldings: EnrichedHolding[];
+      try {
+        enrichedHoldings = await enrichHoldings(holdings);
+      } catch (error) {
+        console.error('[PAYTM API DEBUG] Enrichment against Strategy sheet failed, falling back to raw holdings:', error);
+        enrichedHoldings = holdings.map((h) => ({ ...h, display_symbol: h.trading_symbol, is_synthetic_symbol: false, is_new_holding: false }));
+      }
+      const newHoldingsCount = enrichedHoldings.filter((h) => h.is_new_holding).length;
+
       return NextResponse.json({
-        holdings, totalInvestment, totalCurrentValue, totalPnl, totalPnlPercent,
+        holdings: enrichedHoldings, totalInvestment, totalCurrentValue, totalPnl, totalPnlPercent,
         insights, agentModel,
         sectorBreakdown,
+        newHoldingsCount,
         lastUpdated: new Date().toISOString(),
         paytmApiTimestamp: upstreamTime,
         jwtMeta: decodeJwtTimestamps(cookieToken.value),
@@ -340,3 +432,4 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: e.message, tokenExpired: isTokenError, oauthRequired: isTokenError }, { status: isTokenError ? 401 : 500 });
   }
 }
+
