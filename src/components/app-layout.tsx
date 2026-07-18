@@ -54,6 +54,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
     { href: '/stocknotes', label: 'StockNotes Sheet', icon: FileText },
     { href: '/magic-formula', label: 'Magic formula Sheet', icon: Wand2 },
     { href: '/paytm-portfolio', label: 'Paytm Money Portfolio', icon: Briefcase },
+    { href: '/paytmmoneyint', label: 'Paytm Money Integ Arch', icon: Briefcase },
   ];
 
   return (
