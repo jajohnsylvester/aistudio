@@ -2,7 +2,17 @@
 
 import React from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Workflow } from 'lucide-react';
+import {
+  Workflow,
+  Sparkles,
+  Github as GithubIcon,
+  Zap,
+  Server,
+  Table2,
+  Wallet,
+  Bot,
+  Activity,
+} from 'lucide-react';
 
 // Actors in the sequence diagram, in left-to-right order
 const actors = [
@@ -16,18 +26,33 @@ const actors = [
   'UptimeRobot',
 ];
 
+// Visual identity per actor: icon + gradient colors
+const actorStyle: Record<
+  string,
+  { icon: React.ElementType; from: string; to: string; text: string }
+> = {
+  GoogleAIStudio: { icon: Sparkles, from: '#4F46E5', to: '#818CF8', text: '#FFFFFF' },
+  Github: { icon: GithubIcon, from: '#1F2937', to: '#4B5563', text: '#FFFFFF' },
+  Boltnew: { icon: Zap, from: '#D97706', to: '#FBBF24', text: '#FFFFFF' },
+  OnRenderApp: { icon: Server, from: '#7C3AED', to: '#A78BFA', text: '#FFFFFF' },
+  GoogleSheets: { icon: Table2, from: '#15803D', to: '#4ADE80', text: '#FFFFFF' },
+  PaytmMoney: { icon: Wallet, from: '#0EA5E9', to: '#38BDF8', text: '#FFFFFF' },
+  GeminiLLM: { icon: Bot, from: '#DB2777', to: '#F472B6', text: '#FFFFFF' },
+  UptimeRobot: { icon: Activity, from: '#DC2626', to: '#F87171', text: '#FFFFFF' },
+};
+
 // x-position (center) for each actor's lifeline, evenly spaced
-const ACTOR_GAP = 140;
+const ACTOR_GAP = 150;
 const ACTOR_START_X = 90;
 const actorX: Record<string, number> = actors.reduce((acc, name, i) => {
   acc[name] = ACTOR_START_X + i * ACTOR_GAP;
   return acc;
 }, {} as Record<string, number>);
 
-const HEADER_Y = 40;
-const HEADER_HEIGHT = 44;
+const HEADER_Y = 24;
+const HEADER_HEIGHT = 56;
+const HEADER_WIDTH = 130;
 const LIFELINE_TOP = HEADER_Y + HEADER_HEIGHT;
-const LIFELINE_BOTTOM = 640;
 
 interface Message {
   step: number;
@@ -36,7 +61,6 @@ interface Message {
   label: string;
 }
 
-// direction is inferred automatically from actorX(from) vs actorX(to)
 const messages: Message[] = [
   { step: 1, from: 'GoogleAIStudio', to: 'Github', label: 'Push Code' },
   { step: 2, from: 'Boltnew', to: 'Github', label: 'Push Code' },
@@ -52,34 +76,38 @@ const messages: Message[] = [
   { step: 12, from: 'UptimeRobot', to: 'OnRenderApp', label: 'Keep App alive every 5 min' },
 ];
 
-// Notes shown before step 6, spanning the diagram width
-const notes = [
+// Note shown before step 6, placed between OnRenderApp and PaytmMoney
+const noteLines = [
   'Paytm money API Key & API secret need to be created first',
   'Paytm money requires static IP, webshare.io is used to get Static ip',
 ];
 
-const ROW_START_Y = 100;
-const ROW_GAP = 42;
-const NOTE_GAP = 26;
+const ROW_START_Y = 130;
+const ROW_GAP = 46;
+const NOTE_LINE_HEIGHT = 18;
+const NOTE_PADDING = 10;
 
 function SequenceDiagram() {
   const width = ACTOR_START_X * 2 + (actors.length - 1) * ACTOR_GAP;
 
-  // Lay out rows top-to-bottom, inserting the notes block before step 6
-  const rows: { y: number; kind: 'message' | 'note'; message?: Message; noteIndex?: number }[] = [];
+  // Lay out message rows top-to-bottom, reserving a block for the note before step 6
+  const noteHeight = noteLines.length * NOTE_LINE_HEIGHT + NOTE_PADDING * 2;
+  const messageRows: { y: number; message: Message }[] = [];
   let y = ROW_START_Y;
+  let noteY = 0;
   messages.forEach((m) => {
     if (m.step === 6) {
-      notes.forEach((_, i) => {
-        rows.push({ y, kind: 'note', noteIndex: i });
-        y += NOTE_GAP;
-      });
-      y += 8;
+      noteY = y;
+      y += noteHeight + 30;
     }
-    rows.push({ y, kind: 'message', message: m });
+    messageRows.push({ y, message: m });
     y += ROW_GAP;
   });
   const bottom = y + 20;
+
+  // Note box centered between OnRenderApp and PaytmMoney
+  const noteCenterX = (actorX['OnRenderApp'] + actorX['PaytmMoney']) / 2;
+  const noteWidth = 300;
 
   return (
     <svg
@@ -89,104 +117,118 @@ function SequenceDiagram() {
     >
       <defs>
         <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-          <path d="M0,0 L8,3 L0,6 Z" className="fill-foreground" />
+          <path d="M0,0 L8,3 L0,6 Z" fill="#334155" />
         </marker>
+        <filter id="actorShadow" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="2" stdDeviation="2" floodColor="#0f172a" floodOpacity="0.25" />
+        </filter>
       </defs>
 
       {/* Lifelines */}
       {actors.map((name) => (
-        <g key={name}>
-          <line
-            x1={actorX[name]}
-            y1={LIFELINE_TOP}
-            x2={actorX[name]}
-            y2={bottom}
-            className="stroke-muted-foreground/60"
-            strokeDasharray="5 4"
-            strokeWidth={1.5}
-          />
-        </g>
+        <line
+          key={name}
+          x1={actorX[name]}
+          y1={LIFELINE_TOP}
+          x2={actorX[name]}
+          y2={bottom}
+          stroke="#64748B"
+          strokeOpacity={0.55}
+          strokeDasharray="5 4"
+          strokeWidth={1.75}
+        />
       ))}
 
-      {/* Actor headers */}
-      {actors.map((name) => (
-        <g key={`header-${name}`}>
-          <rect
-            x={actorX[name] - 62}
-            y={HEADER_Y}
-            width={124}
-            height={HEADER_HEIGHT}
-            rx={8}
-            className="fill-slate-100 dark:fill-slate-800 stroke-slate-400 dark:stroke-slate-600"
-            strokeWidth={1.5}
-          />
+      {/* Note box, between OnRenderApp and PaytmMoney */}
+      <g>
+        <rect
+          x={noteCenterX - noteWidth / 2}
+          y={noteY}
+          width={noteWidth}
+          height={noteHeight}
+          rx={6}
+          fill="#FEF9C3"
+          stroke="#EAB308"
+          strokeWidth={1}
+        />
+        {noteLines.map((line, i) => (
           <text
-            x={actorX[name]}
-            y={HEADER_Y + HEADER_HEIGHT / 2 + 4}
+            key={i}
+            x={noteCenterX}
+            y={noteY + NOTE_PADDING + (i + 1) * NOTE_LINE_HEIGHT - 4}
             textAnchor="middle"
-            className="fill-foreground text-[12px] font-medium"
+            fill="#854D0E"
+            fontStyle="italic"
+            fontSize={11}
           >
-            {name}
-          </text>
-        </g>
-      ))}
-
-      {/* Notes */}
-      {rows
-        .filter((r) => r.kind === 'note')
-        .map((r) => (
-          <text
-            key={`note-${r.noteIndex}`}
-            x={actorX[actors[0]]}
-            y={r.y}
-            className="fill-muted-foreground text-[11px] italic"
-          >
-            {notes[r.noteIndex!]}
+            {line}
           </text>
         ))}
+      </g>
+
+      {/* Actor headers */}
+      {actors.map((name) => {
+        const style = actorStyle[name];
+        const Icon = style.icon;
+        return (
+          <g key={`header-${name}`} filter="url(#actorShadow)">
+            <foreignObject
+              x={actorX[name] - HEADER_WIDTH / 2}
+              y={HEADER_Y}
+              width={HEADER_WIDTH}
+              height={HEADER_HEIGHT}
+            >
+              <div
+                style={{
+                  background: `linear-gradient(135deg, ${style.from}, ${style.to})`,
+                  color: style.text,
+                }}
+                className="w-full h-full rounded-xl flex flex-col items-center justify-center gap-0.5 px-2"
+              >
+                <Icon className="h-4 w-4" strokeWidth={2.25} />
+                <span className="text-[11px] font-semibold text-center leading-tight">
+                  {name}
+                </span>
+              </div>
+            </foreignObject>
+          </g>
+        );
+      })}
 
       {/* Messages */}
-      {rows
-        .filter((r) => r.kind === 'message')
-        .map((r) => {
-          const m = r.message!;
-          const x1 = actorX[m.from];
-          const x2 = actorX[m.to];
-          const leftX = Math.min(x1, x2);
-          const rightX = Math.max(x1, x2);
-          const midX = (x1 + x2) / 2;
-          const pointsRight = x2 > x1;
+      {messageRows.map(({ y: rowY, message: m }) => {
+        const x1 = actorX[m.from];
+        const x2 = actorX[m.to];
+        const midX = (x1 + x2) / 2;
+        const leftX = Math.min(x1, x2);
 
-          return (
-            <g key={m.step}>
-              <text
-                x={leftX - 14}
-                y={r.y - 8}
-                className="fill-muted-foreground text-[11px]"
-              >
-                {m.step}
-              </text>
-              <text
-                x={midX}
-                y={r.y - 8}
-                textAnchor="middle"
-                className="fill-foreground text-[12px] font-medium"
-              >
-                {m.label}
-              </text>
-              <line
-                x1={pointsRight ? x1 : rightX}
-                y1={r.y}
-                x2={pointsRight ? rightX : x1}
-                y2={r.y}
-                className="stroke-foreground"
-                strokeWidth={1.5}
-                markerEnd="url(#arrow)"
-                transform={pointsRight ? undefined : `translate(${leftX + rightX}, 0) scale(-1, 1)`}
-              />
-            </g>
-          );
-        })}
+        return (
+          <g key={m.step}>
+            <text x={leftX - 16} y={rowY - 8} fill="#64748B" fontSize={11}>
+              {m.step}
+            </text>
+            <text
+              x={midX}
+              y={rowY - 8}
+              textAnchor="middle"
+              fill="#0F172A"
+              fontSize={12}
+              fontWeight={600}
+            >
+              {m.label}
+            </text>
+            <line
+              x1={x1}
+              y1={rowY}
+              x2={x2}
+              y2={rowY}
+              stroke="#334155"
+              strokeWidth={1.75}
+              markerEnd="url(#arrow)"
+            />
+          </g>
+        );
+      })}
     </svg>
   );
 }
@@ -211,7 +253,7 @@ export default function PaytmIntegrationArchitecturePage() {
         </CardHeader>
         <CardContent>
           <div className="w-full overflow-x-auto rounded-md border bg-white dark:bg-slate-900 p-4">
-            <div className="min-w-[1100px]">
+            <div className="min-w-[1200px]">
               <SequenceDiagram />
             </div>
           </div>
