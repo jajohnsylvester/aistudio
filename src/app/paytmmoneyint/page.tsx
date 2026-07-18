@@ -101,9 +101,9 @@ function SequenceDiagram() {
             y1={LIFELINE_TOP}
             x2={actorX[name]}
             y2={bottom}
-            className="stroke-border"
-            strokeDasharray="4 4"
-            strokeWidth={1}
+            className="stroke-muted-foreground/60"
+            strokeDasharray="5 4"
+            strokeWidth={1.5}
           />
         </g>
       ))}
@@ -117,7 +117,7 @@ function SequenceDiagram() {
             width={124}
             height={HEADER_HEIGHT}
             rx={8}
-            className="fill-card stroke-border"
+            className="fill-slate-100 dark:fill-slate-800 stroke-slate-400 dark:stroke-slate-600"
             strokeWidth={1.5}
           />
           <text
@@ -193,7 +193,7 @@ function SequenceDiagram() {
 
 export default function PaytmIntegrationArchitecturePage() {
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-6 bg-slate-50 dark:bg-slate-950 min-h-screen p-6 -m-6">
       <div className="flex items-center gap-2">
         <Workflow className="h-8 w-8 text-primary" />
         <h1 className="text-3xl font-bold tracking-tight font-headline">
@@ -210,7 +210,7 @@ export default function PaytmIntegrationArchitecturePage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="w-full overflow-x-auto rounded-md border bg-background p-4">
+          <div className="w-full overflow-x-auto rounded-md border bg-white dark:bg-slate-900 p-4">
             <div className="min-w-[1100px]">
               <SequenceDiagram />
             </div>
