@@ -148,14 +148,13 @@ function getSplitBreakdownTooltip(h: HoldingWithStrategy): string | undefined {
 
   const parts = h.strategyAssignments.map((sa) => {
     const qty = typeof sa.quantity === 'number' ? sa.quantity : h.quantity;
-    return `${qty} → ${sa.strategy}`;
+    return `${sa.strategy} : ${qty}`;
   });
   if (h.remainingQuantity > 0) {
-    parts.push(`${h.remainingQuantity} → Unassigned`);
+    parts.push(`Unassigned : ${h.remainingQuantity}`);
   }
 
-  const namePart = h.name && h.name !== h.displaySymbol ? ` (${h.name})` : '';
-  return `${h.displaySymbol}${namePart} — ${h.quantity} total split as: ${parts.join(', ')}`;
+  return `${h.displaySymbol} - Total : ${h.quantity}   Split : ${parts.join(' , ')}`;
 }
 
 function formatINR(value: number): string {
