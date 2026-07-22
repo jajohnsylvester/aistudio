@@ -1,8 +1,12 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo, Suspense, type DragEvent } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef, Suspense, Fragment, type DragEvent } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { getStrategyAssignments, addStrategyAssignment, deleteStrategyAssignment, type StrategyAssignment } from '@/lib/sheets';
+import {
+  getStrategyAssignments, addStrategyAssignment, deleteStrategyAssignment,
+  updateStrategyAssignment, renameStrategy, deleteStrategy,
+  type StrategyAssignment,
+} from '@/lib/sheets';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
@@ -11,7 +15,7 @@ import {
   Loader2, RefreshCw, Wallet, TrendingUp, TrendingDown,
   AlertCircle, CheckCircle, Lightbulb, ExternalLink, Key,
   Shield, RefreshCcw, Server, Bot, Database, Zap, Clock, Laptop, Fingerprint, Timer, Play, PieChart, ChevronDown, ChevronUp,
-  Layers, Plus, X, Activity
+  Layers, Plus, X, Activity, Pencil, Trash2, Check, SplitSquareHorizontal
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -61,6 +65,10 @@ interface Holding {
   display_symbol?: string;
   is_synthetic_symbol?: boolean;
   is_new_holding?: boolean;
+  // Full/company name of the asset (e.g. "Infosys Limited"), resolved
+  // server-side. Used for the hover tooltip and the asset-name filter.
+  // Optional for the same "older cached response" reason as above.
+  name?: string;
 }
 
 interface SectorBreakdownEntry {
@@ -103,7 +111,11 @@ interface DragPayload {
 interface HoldingWithStrategy extends Holding {
   displaySymbol: string;
   isSyntheticSymbol: boolean;
-  strategyAssignments: { id: string; strategy: string }[];
+  // quantity undefined on an assignment means "the whole holding" (either a
+  // legacy row, or a holding that hasn't been split across strategies).
+  strategyAssignments: { id: string; strategy: string; quantity?: number }[];
+  assignedQuantity: number;
+  remainingQuantity: number;
 }
 
 const SECTOR_COLORS = ['#3B82F6', '#F59E0B', '#10B981', '#8B5CF6', '#EF4444', '#06B6D4', '#EC4899', '#84CC16'];
@@ -111,6 +123,13 @@ const STRATEGY_COLORS = ['#2563EB', '#059669', '#F59E0B', '#7C3AED', '#DC2626', 
 const UNASSIGNED_COLOR = '#94A3B8';
 const NEW_HOLDING_COLOR = '#D97706';
 const UNASSIGNED_FILTER_VALUE = '__unassigned__';
+// Distinct from UNASSIGNED_FILTER_VALUE (zero assignments): this one also
+// catches holdings that have been split but still have leftover quantity
+// that hasn't been allocated to any strategy yet.
+const REMAINING_FILTER_VALUE = '__remaining__';
+// localStorage key used to remember which holding's split editor was open,
+// so it survives a page refresh.
+const SPLIT_EDITOR_STORAGE_KEY = 'paytm-portfolio-split-editor-symbol';
 
 function getStrategyColor(strategy: string, strategies: string[]): string {
   const idx = strategies.indexOf(strategy);
@@ -281,6 +300,18 @@ function PaytmPortfolioContent() {
   const [newStrategyName, setNewStrategyName] = useState<string>('');
   const [dragOverTarget, setDragOverTarget] = useState<string | null>(null); // '' = Unassigned pool, else strategy name
 
+  // Rename-in-place for a strategy (edit icon on its card header)
+  const [editingStrategyName, setEditingStrategyName] = useState<string | null>(null);
+  const [editingStrategyValue, setEditingStrategyValue] = useState<string>('');
+
+  // Split-a-holding-across-strategies editor, keyed by the holding's
+  // displaySymbol. Values are the raw text of each strategy's quantity
+  // input so the user can clear a field while typing.
+  const [splitEditorSymbol, setSplitEditorSymbol] = useState<string | null>(null);
+  const [splitAllocations, setSplitAllocations] = useState<Record<string, string>>({});
+  const [isSavingSplit, setIsSavingSplit] = useState<boolean>(false);
+  const hasRestoredSplitEditor = useRef(false);
+
   // Asset Holdings Detail filters
   const [filterSymbol, setFilterSymbol] = useState<string>('');
   const [filterSector, setFilterSector] = useState<string>('');
@@ -363,11 +394,11 @@ function PaytmPortfolioContent() {
   }, [assignments]);
 
   const symbolAssignmentsMap = useMemo(() => {
-    const map = new Map<string, { id: string; strategy: string }[]>();
+    const map = new Map<string, { id: string; strategy: string; quantity?: number }[]>();
     assignments.forEach((a) => {
       if (!a.symbol) return; // strategy-only definition row, not a holding assignment
       const list = map.get(a.symbol) || [];
-      list.push({ id: a.id, strategy: a.strategy });
+      list.push({ id: a.id, strategy: a.strategy, quantity: a.quantity });
       map.set(a.symbol, list);
     });
     return map;
@@ -386,17 +417,30 @@ function PaytmPortfolioContent() {
     return portfolio.holdings.map((h, idx) => {
       const displaySymbol = h.display_symbol ?? fallbackResolved[idx].displaySymbol;
       const isSyntheticSymbol = h.is_synthetic_symbol ?? fallbackResolved[idx].isSynthetic;
+      const strategyAssignments = symbolAssignmentsMap.get(displaySymbol) || [];
+      // An assignment with no quantity of its own claims the whole holding
+      // (legacy rows, and rows that haven't been split).
+      const assignedQuantity = strategyAssignments.reduce(
+        (sum, sa) => sum + (typeof sa.quantity === 'number' ? sa.quantity : h.quantity),
+        0
+      );
+      const remainingQuantity = Math.max(0, h.quantity - assignedQuantity);
       return {
         ...h,
         displaySymbol,
         isSyntheticSymbol,
-        strategyAssignments: symbolAssignmentsMap.get(displaySymbol) || [],
+        strategyAssignments,
+        assignedQuantity,
+        remainingQuantity,
       };
     });
   }, [portfolio, symbolAssignmentsMap]);
 
+  // A holding belongs in the Unassigned pool as long as some of its
+  // quantity hasn't been claimed by any strategy yet — including a holding
+  // that's been split and still has a leftover, unassigned remainder.
   const unassignedHoldings = useMemo(
-    () => holdingsWithStrategy.filter((h) => h.strategyAssignments.length === 0),
+    () => holdingsWithStrategy.filter((h) => h.remainingQuantity > 0),
     [holdingsWithStrategy]
   );
 
@@ -431,9 +475,18 @@ function PaytmPortfolioContent() {
   const strategySummaries = useMemo(() => {
     return strategies.map((name) => {
       const holdingsInStrategy = holdingsWithStrategy.filter((h) => h.strategyAssignments.some((sa) => sa.strategy === name));
-      const investmentValue = holdingsInStrategy.reduce((s, h) => s + h.investment_value, 0);
-      const currentValue = holdingsInStrategy.reduce((s, h) => s + h.current_value, 0);
-      const pnl = holdingsInStrategy.reduce((s, h) => s + h.pnl, 0);
+      // A split holding only contributes the slice of its value that's
+      // actually allocated to this strategy (quantity / total quantity);
+      // an unsplit assignment (quantity undefined) contributes the whole
+      // holding, matching pre-split behavior.
+      let investmentValue = 0, currentValue = 0, pnl = 0;
+      holdingsInStrategy.forEach((h) => {
+        const sa = h.strategyAssignments.find((a) => a.strategy === name)!;
+        const fraction = typeof sa.quantity === 'number' && h.quantity > 0 ? sa.quantity / h.quantity : 1;
+        investmentValue += h.investment_value * fraction;
+        currentValue += h.current_value * fraction;
+        pnl += h.pnl * fraction;
+      });
       return {
         strategy: name,
         holdings: holdingsInStrategy,
@@ -455,12 +508,19 @@ function PaytmPortfolioContent() {
   const filteredHoldings = useMemo(() => {
     const symbolQuery = filterSymbol.trim().toLowerCase();
     return holdingsWithStrategy.filter((h) => {
-      if (symbolQuery && !h.displaySymbol.toLowerCase().includes(symbolQuery) && !h.trading_symbol.toLowerCase().includes(symbolQuery)) {
+      if (
+        symbolQuery &&
+        !h.displaySymbol.toLowerCase().includes(symbolQuery) &&
+        !h.trading_symbol.toLowerCase().includes(symbolQuery) &&
+        !(h.name || '').toLowerCase().includes(symbolQuery)
+      ) {
         return false;
       }
       if (filterSector && h.sector !== filterSector) return false;
       if (filterStrategy === UNASSIGNED_FILTER_VALUE) {
         if (h.strategyAssignments.length > 0) return false;
+      } else if (filterStrategy === REMAINING_FILTER_VALUE) {
+        if (h.remainingQuantity <= 0) return false;
       } else if (filterStrategy) {
         if (!h.strategyAssignments.some((sa) => sa.strategy === filterStrategy)) return false;
       }
@@ -519,6 +579,155 @@ function PaytmPortfolioContent() {
       setIsSavingStrategy(false);
     }
   }, [toast]);
+
+  const handleStartRenameStrategy = useCallback((name: string) => {
+    setEditingStrategyName(name);
+    setEditingStrategyValue(name);
+  }, []);
+
+  const handleCancelRenameStrategy = useCallback(() => {
+    setEditingStrategyName(null);
+    setEditingStrategyValue('');
+  }, []);
+
+  const handleConfirmRenameStrategy = useCallback(async (oldName: string) => {
+    const newName = editingStrategyValue.trim();
+    if (!newName || newName === oldName) {
+      handleCancelRenameStrategy();
+      return;
+    }
+    if (strategies.some((s) => s.toLowerCase() === newName.toLowerCase() && s !== oldName)) {
+      toast({ variant: 'destructive', title: 'Strategy already exists', description: `"${newName}" is already in your strategy list.` });
+      return;
+    }
+    setIsSavingStrategy(true);
+    try {
+      await renameStrategy(oldName, newName);
+      const fresh = await getStrategyAssignments();
+      setAssignments(fresh);
+      handleCancelRenameStrategy();
+    } catch (error: any) {
+      toast({ variant: 'destructive', title: 'Failed to rename strategy', description: error.message });
+    } finally {
+      setIsSavingStrategy(false);
+    }
+  }, [editingStrategyValue, strategies, toast, handleCancelRenameStrategy]);
+
+  const handleDeleteStrategyClick = useCallback(async (name: string) => {
+    if (!window.confirm(`Delete strategy "${name}"? Holdings assigned to it will move back to Unassigned.`)) return;
+    setIsSavingStrategy(true);
+    try {
+      await deleteStrategy(name);
+      const fresh = await getStrategyAssignments();
+      setAssignments(fresh);
+    } catch (error: any) {
+      toast({ variant: 'destructive', title: 'Failed to delete strategy', description: error.message });
+    } finally {
+      setIsSavingStrategy(false);
+    }
+  }, [toast]);
+
+  // --- Split-a-holding-across-strategies editor ---
+
+  const handleOpenSplitEditor = useCallback((h: HoldingWithStrategy) => {
+    const initial: Record<string, string> = {};
+    strategies.forEach((s) => {
+      const existing = h.strategyAssignments.find((sa) => sa.strategy === s);
+      if (existing) {
+        initial[s] = String(typeof existing.quantity === 'number' ? existing.quantity : h.quantity);
+      }
+    });
+    setSplitAllocations(initial);
+    setSplitEditorSymbol(h.displaySymbol);
+    try {
+      localStorage.setItem(SPLIT_EDITOR_STORAGE_KEY, h.displaySymbol);
+    } catch {
+      // localStorage unavailable (private browsing, SSR, etc.) — the editor
+      // still works for this session, it just won't survive a refresh.
+    }
+  }, [strategies]);
+
+  const handleCloseSplitEditor = useCallback(() => {
+    setSplitEditorSymbol(null);
+    setSplitAllocations({});
+    try {
+      localStorage.removeItem(SPLIT_EDITOR_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Re-open whichever holding's split editor was open before a refresh.
+  // Guarded to run once: holdingsWithStrategy is recomputed on every poll,
+  // and re-running this after the user has since closed (or switched) the
+  // editor would clobber their in-progress edits.
+  useEffect(() => {
+    if (hasRestoredSplitEditor.current) return;
+    if (holdingsWithStrategy.length === 0) return;
+    hasRestoredSplitEditor.current = true;
+    try {
+      const stored = localStorage.getItem(SPLIT_EDITOR_STORAGE_KEY);
+      if (!stored) return;
+      const holding = holdingsWithStrategy.find((h) => h.displaySymbol === stored);
+      if (holding) {
+        handleOpenSplitEditor(holding);
+      } else {
+        localStorage.removeItem(SPLIT_EDITOR_STORAGE_KEY);
+      }
+    } catch {
+      // localStorage unavailable — nothing to restore
+    }
+  }, [holdingsWithStrategy, handleOpenSplitEditor]);
+
+  const handleSplitAllocationChange = useCallback((strategy: string, value: string) => {
+    setSplitAllocations((prev) => ({ ...prev, [strategy]: value }));
+  }, []);
+
+  const handleSaveSplit = useCallback(async (h: HoldingWithStrategy) => {
+    const entries = Object.entries(splitAllocations)
+      .map(([strategy, raw]) => ({ strategy, quantity: parseFloat(raw) }))
+      .filter((e) => !isNaN(e.quantity) && e.quantity > 0);
+
+    const total = entries.reduce((s, e) => s + e.quantity, 0);
+    if (total > h.quantity + 1e-9) {
+      toast({
+        variant: 'destructive',
+        title: 'Allocation exceeds holding quantity',
+        description: `You allocated ${total} but only ${h.quantity} units are held.`,
+      });
+      return;
+    }
+
+    setIsSavingSplit(true);
+    try {
+      // Remove/adjust every existing assignment for this holding, then add
+      // any brand-new ones — always writing an explicit quantity so partial
+      // allocations are unambiguous going forward.
+      for (const sa of h.strategyAssignments) {
+        const kept = entries.find((e) => e.strategy === sa.strategy);
+        if (!kept) {
+          await deleteStrategyAssignment(sa.id);
+        } else if (kept.quantity !== sa.quantity) {
+          await updateStrategyAssignment(sa.id, { quantity: kept.quantity });
+        }
+      }
+      for (const e of entries) {
+        const existed = h.strategyAssignments.some((sa) => sa.strategy === e.strategy);
+        if (!existed) {
+          await addStrategyAssignment({ symbol: h.displaySymbol, strategy: e.strategy, quantity: e.quantity });
+        }
+      }
+
+      const fresh = await getStrategyAssignments();
+      setAssignments(fresh);
+      handleCloseSplitEditor();
+      toast({ title: 'Allocation updated', description: `${h.displaySymbol} split across ${entries.length} ${entries.length === 1 ? 'strategy' : 'strategies'}.` });
+    } catch (error: any) {
+      toast({ variant: 'destructive', title: 'Failed to save split', description: error.message });
+    } finally {
+      setIsSavingSplit(false);
+    }
+  }, [splitAllocations, toast, handleCloseSplitEditor]);
 
   const handleChipDragStart = (e: DragEvent<HTMLDivElement>, payload: DragPayload) => {
     e.dataTransfer.setData('application/json', JSON.stringify(payload));
@@ -804,8 +1013,8 @@ function PaytmPortfolioContent() {
                   type="text"
                   value={filterSymbol}
                   onChange={(e) => setFilterSymbol(e.target.value)}
-                  placeholder="Filter by symbol…"
-                  className="text-xs p-1.5 border rounded-md outline-none min-w-[140px]"
+                  placeholder="Filter by symbol or name…"
+                  className="text-xs p-1.5 border rounded-md outline-none min-w-[180px]"
                 />
                 <select
                   value={filterSector}
@@ -824,6 +1033,7 @@ function PaytmPortfolioContent() {
                 >
                   <option value="">All strategies</option>
                   <option value={UNASSIGNED_FILTER_VALUE}>Unassigned</option>
+                  <option value={REMAINING_FILTER_VALUE}>Has unassigned qty (incl. splits)</option>
                   {strategies.map((s) => (
                     <option key={s} value={s}>{s}</option>
                   ))}
@@ -853,20 +1063,22 @@ function PaytmPortfolioContent() {
                       <TableHead className="text-right">Avg Price</TableHead>
                       <TableHead className="text-right">LTP</TableHead>
                       <TableHead className="text-right">Total P&L</TableHead>
+                      <TableHead className="text-right"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {filteredHoldings.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={7} className="text-center text-xs text-muted-foreground italic py-6">
+                        <TableCell colSpan={8} className="text-center text-xs text-muted-foreground italic py-6">
                           No holdings match the current filters.
                         </TableCell>
                       </TableRow>
                     ) : (
                       filteredHoldings.map((h) => (
-                      <TableRow key={h.displaySymbol}>
+                      <Fragment key={h.displaySymbol}>
+                      <TableRow>
                         <TableCell className="font-semibold">
-                          <span className="flex items-center gap-1.5">
+                          <span className="flex items-center gap-1.5" title={h.name && h.name !== h.displaySymbol ? h.name : undefined}>
                             {h.displaySymbol}
                             {h.isSyntheticSymbol && (
                               <span className="text-xxs font-normal text-slate-400" title={`Original symbol from Paytm: "${h.trading_symbol}"`}>
@@ -879,6 +1091,9 @@ function PaytmPortfolioContent() {
                               </Badge>
                             )}
                           </span>
+                          {h.name && h.name !== h.displaySymbol && (
+                            <p className="text-xxs font-normal text-slate-400 truncate max-w-[180px]" title={h.name}>{h.name}</p>
+                          )}
                         </TableCell>
                         <TableCell><Badge variant="outline" className="font-normal">{h.sector}</Badge></TableCell>
                         <TableCell>
@@ -888,24 +1103,33 @@ function PaytmPortfolioContent() {
                                 Unassigned
                               </Badge>
                             )}
-                            {h.strategyAssignments.map((sa) => (
-                              <Badge
-                                key={sa.id}
-                                variant="outline"
-                                className="font-normal pr-1 flex items-center gap-0.5"
-                                style={{ color: getStrategyColor(sa.strategy, strategies), borderColor: getStrategyColor(sa.strategy, strategies) }}
-                              >
-                                {sa.strategy}
-                                <button
-                                  type="button"
-                                  onClick={() => handleUnassign(sa.id)}
-                                  aria-label={`Remove ${h.displaySymbol} from ${sa.strategy}`}
-                                  className="rounded hover:bg-black/10 p-0.5 ml-0.5"
+                            {h.strategyAssignments.map((sa) => {
+                              const isSplit = typeof sa.quantity === 'number' && sa.quantity !== h.quantity;
+                              return (
+                                <Badge
+                                  key={sa.id}
+                                  variant="outline"
+                                  className="font-normal pr-1 flex items-center gap-0.5"
+                                  style={{ color: getStrategyColor(sa.strategy, strategies), borderColor: getStrategyColor(sa.strategy, strategies) }}
+                                  title={isSplit ? `${sa.quantity} of ${h.quantity} units allocated to ${sa.strategy}` : undefined}
                                 >
-                                  <X className="h-2.5 w-2.5" />
-                                </button>
-                              </Badge>
-                            ))}
+                                  {sa.strategy}{isSplit ? ` (${sa.quantity}/${h.quantity})` : ''}
+                                  <button
+                                    type="button"
+                                    onClick={() => handleUnassign(sa.id)}
+                                    aria-label={`Remove ${h.displaySymbol} from ${sa.strategy}`}
+                                    className="rounded hover:bg-black/10 p-0.5 ml-0.5"
+                                  >
+                                    <X className="h-2.5 w-2.5" />
+                                  </button>
+                                </Badge>
+                              );
+                            })}
+                            {h.strategyAssignments.length > 0 && h.remainingQuantity > 0 && (
+                              <span className="text-xxs text-slate-400" title="Portion of this holding not yet assigned to a strategy">
+                                {h.remainingQuantity} unassigned
+                              </span>
+                            )}
                             {strategies.filter((s) => !h.strategyAssignments.some((sa) => sa.strategy === s)).length > 0 && (
                               <select
                                 value=""
@@ -929,7 +1153,66 @@ function PaytmPortfolioContent() {
                         <TableCell className={`text-right ${h.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                           {formatINR(h.pnl)} ({h.pnl_percent.toFixed(2)}%)
                         </TableCell>
+                        <TableCell className="text-right">
+                          {strategies.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => splitEditorSymbol === h.displaySymbol ? handleCloseSplitEditor() : handleOpenSplitEditor(h)}
+                              title="Split this holding's quantity across strategies"
+                              aria-label={`Split ${h.displaySymbol} across strategies`}
+                              className="p-1 rounded hover:bg-black/5 text-slate-400 hover:text-slate-600"
+                            >
+                              <SplitSquareHorizontal className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </TableCell>
                       </TableRow>
+                      {splitEditorSymbol === h.displaySymbol && (
+                        <TableRow>
+                          <TableCell colSpan={8} className="bg-slate-50/70 border-t-0">
+                            <div className="p-3 rounded-md border bg-white">
+                              <p className="text-xs font-semibold text-slate-600 mb-2">
+                                Split {h.displaySymbol} ({h.quantity} units) across strategies
+                              </p>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 mb-2">
+                                {strategies.map((s) => (
+                                  <label key={s} className="flex items-center gap-2 text-xs">
+                                    <span className="flex-1 truncate" style={{ color: getStrategyColor(s, strategies) }}>{s}</span>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      step="any"
+                                      value={splitAllocations[s] ?? ''}
+                                      onChange={(e) => handleSplitAllocationChange(s, e.target.value)}
+                                      placeholder="0"
+                                      className="w-20 text-xs p-1 border rounded outline-none text-right"
+                                    />
+                                  </label>
+                                ))}
+                              </div>
+                              {(() => {
+                                const allocated = Object.values(splitAllocations).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+                                const over = allocated > h.quantity + 1e-9;
+                                return (
+                                  <p className={`text-xxs mb-2 ${over ? 'text-red-600 font-semibold' : 'text-muted-foreground'}`}>
+                                    Allocated {allocated} of {h.quantity} units{over ? ' — exceeds holding quantity' : ''}
+                                  </p>
+                                );
+                              })()}
+                              <div className="flex items-center gap-2">
+                                <Button size="sm" onClick={() => handleSaveSplit(h)} disabled={isSavingSplit}>
+                                  {isSavingSplit ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Check className="h-3.5 w-3.5 mr-1.5" />}
+                                  Save Split
+                                </Button>
+                                <button type="button" onClick={handleCloseSplitEditor} className="text-xs text-slate-500 hover:text-slate-700 underline">
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                      </Fragment>
                       ))
                     )}
                   </TableBody>
@@ -1077,10 +1360,17 @@ function PaytmPortfolioContent() {
                             onDragStart={(e) => handleChipDragStart(e, { symbol: h.displaySymbol, assignmentId: null, sourceStrategy: null })}
                             className="px-2.5 py-1.5 rounded-md border text-xs font-semibold cursor-grab active:cursor-grabbing shadow-sm select-none flex items-center gap-1.5"
                             style={isNew ? { backgroundColor: '#FFFBEB', borderColor: NEW_HOLDING_COLOR, color: '#92400E' } : { backgroundColor: 'white' }}
-                            title={h.isSyntheticSymbol ? `Original symbol from Paytm: "${h.trading_symbol}"` : undefined}
+                            title={
+                              h.isSyntheticSymbol
+                                ? `Original symbol from Paytm: "${h.trading_symbol}"`
+                                : (h.name && h.name !== h.displaySymbol ? h.name : undefined)
+                            }
                           >
                             {isNew && <span className="h-1.5 w-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: NEW_HOLDING_COLOR }} />}
                             {h.displaySymbol}
+                            {h.remainingQuantity < h.quantity && (
+                              <span className="text-[10px] font-normal opacity-70">({h.remainingQuantity} left)</span>
+                            )}
                           </div>
                         );
                       })
@@ -1105,8 +1395,65 @@ function PaytmPortfolioContent() {
                         className={`rounded-lg border overflow-hidden bg-white flex flex-col transition-shadow ${isDragOver ? 'ring-2 ring-offset-1' : ''}`}
                         style={isDragOver ? { boxShadow: `0 0 0 2px ${color}` } : undefined}
                       >
-                        <div className="px-4 py-2.5 text-white font-semibold text-sm" style={{ backgroundColor: color }}>
-                          {s.strategy}
+                        <div className="px-4 py-2.5 text-white font-semibold text-sm flex items-center justify-between gap-2" style={{ backgroundColor: color }}>
+                          {editingStrategyName === s.strategy ? (
+                            <div className="flex items-center gap-1 flex-1">
+                              <input
+                                autoFocus
+                                type="text"
+                                value={editingStrategyValue}
+                                onChange={(e) => setEditingStrategyValue(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') handleConfirmRenameStrategy(s.strategy);
+                                  if (e.key === 'Escape') handleCancelRenameStrategy();
+                                }}
+                                disabled={isSavingStrategy}
+                                className="flex-1 text-xs p-1 rounded text-slate-800 outline-none disabled:opacity-60"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => handleConfirmRenameStrategy(s.strategy)}
+                                aria-label={`Save new name for ${s.strategy}`}
+                                className="p-1 rounded hover:bg-white/20"
+                              >
+                                <Check className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleCancelRenameStrategy}
+                                aria-label="Cancel rename"
+                                className="p-1 rounded hover:bg-white/20"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              <span className="truncate">{s.strategy}</span>
+                              <span className="flex items-center gap-0.5 flex-shrink-0">
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartRenameStrategy(s.strategy)}
+                                  aria-label={`Rename ${s.strategy}`}
+                                  title="Rename strategy"
+                                  disabled={isSavingStrategy}
+                                  className="p-1 rounded hover:bg-white/20 disabled:opacity-60"
+                                >
+                                  <Pencil className="h-3 w-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteStrategyClick(s.strategy)}
+                                  aria-label={`Delete ${s.strategy}`}
+                                  title="Delete strategy"
+                                  disabled={isSavingStrategy}
+                                  className="p-1 rounded hover:bg-white/20 disabled:opacity-60"
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </button>
+                              </span>
+                            </>
+                          )}
                         </div>
                         <div className="grid grid-cols-3 divide-x border-b bg-slate-50/60">
                           <div className="px-2 py-2 text-center">
@@ -1128,6 +1475,12 @@ function PaytmPortfolioContent() {
                           ) : (
                             s.holdings.map((h) => {
                               const assignment = h.strategyAssignments.find((sa) => sa.strategy === s.strategy)!;
+                              const isSplit = typeof assignment.quantity === 'number' && assignment.quantity !== h.quantity;
+                              const tooltip = isSplit
+                                ? `${assignment.quantity} of ${h.quantity} units${h.name && h.name !== h.displaySymbol ? ` — ${h.name}` : ''}`
+                                : (h.isSyntheticSymbol
+                                    ? `Original symbol from Paytm: "${h.trading_symbol}"`
+                                    : (h.name && h.name !== h.displaySymbol ? h.name : undefined));
                               return (
                                 <div
                                   key={assignment.id}
@@ -1135,9 +1488,10 @@ function PaytmPortfolioContent() {
                                   onDragStart={(e) => handleChipDragStart(e, { symbol: h.displaySymbol, assignmentId: assignment.id, sourceStrategy: s.strategy })}
                                   className="flex items-center gap-1 pl-2.5 pr-1.5 py-1.5 rounded-md text-white text-xs font-semibold cursor-grab active:cursor-grabbing shadow-sm select-none"
                                   style={{ backgroundColor: color }}
-                                  title={h.isSyntheticSymbol ? `Original symbol from Paytm: "${h.trading_symbol}"` : undefined}
+                                  title={tooltip}
                                 >
                                   {h.displaySymbol}
+                                  {isSplit && <span className="text-[10px] font-normal opacity-80">({assignment.quantity}/{h.quantity})</span>}
                                   <button
                                     type="button"
                                     onClick={() => handleUnassign(assignment.id)}
@@ -1299,5 +1653,6 @@ function PaytmPortfolioContent() {
 export default function PaytmPortfolioPage() {
   return <Suspense fallback={<div className="p-8"><Loader2 className="animate-spin text-primary mx-auto h-8 w-8" /></div>}><PaytmPortfolioContent /></Suspense>;
 }
+
 
 
