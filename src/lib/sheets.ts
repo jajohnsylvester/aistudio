@@ -1105,11 +1105,21 @@ export interface StrategyAssignment {
   symbol: string; // '' means this row only declares the strategy, no holding assigned yet
   strategy: string;
   date: string;
+  // Quantity of the holding carved out for this particular assignment, used
+  // to split a single holding's quantity across more than one strategy at
+  // once. undefined means "the whole holding" (legacy rows, and rows that
+  // haven't been split) rather than a fixed slice of it.
+  quantity?: number;
 }
 
-const DEFAULT_STRATEGY_HEADERS = ['symbol', 'strategy', 'date'];
+const DEFAULT_STRATEGY_HEADERS = ['symbol', 'strategy', 'date', 'quantity'];
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
-const HEADER_WORDS = ['id', 'symbol', 'strategy', 'date'];
+const HEADER_WORDS = ['id', 'symbol', 'strategy', 'date', 'quantity'];
+// New rows are always written with quantity (if any) physically in column D
+// (0-based index 3), so parsing can pull it out by position instead of by
+// the same "single small integer" heuristic used for legacy marker cells —
+// that heuristic would otherwise be ambiguous with a genuine quantity value.
+const QUANTITY_COL_INDEX = 3;
 
 function looksLikeHeaderRow(values: string[]): boolean {
     return values.length > 0 && values.every((v) => HEADER_WORDS.includes(v.toLowerCase()));
@@ -1131,10 +1141,24 @@ function parseStrategyRows(rows: any[][] | null | undefined): StrategyAssignment
         if (cells.length === 0) return;
         if (looksLikeHeaderRow(cells.map((c) => c.value))) return; // skip an actual header row, if present
 
+        // Pull out the quantity cell first — it always lives in the fixed
+        // column D for rows this app writes, so it's identified by position
+        // rather than by the same content heuristics used below (which
+        // would otherwise mistake it for the old marker cell).
+        let quantityCell: { value: string; colIdx: number } | null = null;
+        const cellsAfterQuantity: typeof cells = [];
+        for (const c of cells) {
+            if (!quantityCell && c.colIdx === QUANTITY_COL_INDEX && /^\d+(\.\d+)?$/.test(c.value)) {
+                quantityCell = c;
+            } else {
+                cellsAfterQuantity.push(c);
+            }
+        }
+
         // Pull out the date cell (the one that parses as an ISO timestamp).
         let dateCell: { value: string; colIdx: number } | null = null;
         const afterDate: typeof cells = [];
-        for (const c of cells) {
+        for (const c of cellsAfterQuantity) {
             if (!dateCell && ISO_DATE_REGEX.test(c.value)) {
                 dateCell = c;
             } else {
@@ -1172,6 +1196,7 @@ function parseStrategyRows(rows: any[][] | null | undefined): StrategyAssignment
             symbol,
             strategy,
             date: dateCell ? dateCell.value : '',
+            quantity: quantityCell ? parseFloat(quantityCell.value) : undefined,
         });
     });
 
@@ -1202,7 +1227,7 @@ export async function getStrategyAssignments(): Promise<StrategyAssignment[]> {
     }
 }
 
-export async function addStrategyAssignment(data: { symbol: string; strategy: string }): Promise<StrategyAssignment> {
+export async function addStrategyAssignment(data: { symbol: string; strategy: string; quantity?: number }): Promise<StrategyAssignment> {
     const sheets = await getSheets();
     const sheetId = getSheetId();
 
@@ -1216,6 +1241,7 @@ export async function addStrategyAssignment(data: { symbol: string; strategy: st
     const symbol = data.symbol.trim();
     const strategy = data.strategy.trim();
     const date = new Date().toISOString();
+    const quantity = typeof data.quantity === 'number' && !isNaN(data.quantity) ? data.quantity : undefined;
 
     // Total rows used anywhere in the sheet (any column), so the new row's
     // physical position — and therefore its id — is predictable regardless
@@ -1232,11 +1258,142 @@ export async function addStrategyAssignment(data: { symbol: string; strategy: st
         range: range,
         valueInputOption: 'USER_ENTERED',
         requestBody: {
-            values: [[symbol, strategy, date]],
+            values: [[symbol, strategy, date, quantity ?? '']],
         },
     });
 
-    return { id: `row-${physicalRow}`, symbol, strategy, date };
+    return { id: `row-${physicalRow}`, symbol, strategy, date, quantity };
+}
+
+// Updates an existing assignment row in place — used both to edit a split's
+// quantity and to rename/retarget a single assignment. Any field left out
+// of `updates` keeps its current value. Rewriting the full row (rather than
+// patching a single cell) also normalizes legacy rows into the fixed
+// [symbol, strategy, date, quantity] shape the moment they're touched.
+export async function updateStrategyAssignment(
+    id: string,
+    updates: { symbol?: string; strategy?: string; quantity?: number | null }
+): Promise<StrategyAssignment> {
+    const sheets = await getSheets();
+    const sheetId = getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
+    const match = id.match(/-(\d+)$/);
+    const physicalRow = match ? parseInt(match[1], 10) : NaN;
+    if (isNaN(physicalRow)) {
+        throw new Error('Strategy assignment not found to update');
+    }
+
+    const range = 'Strategy';
+    const rowResponse = await sheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range: `${range}!A${physicalRow}:Z${physicalRow}`,
+    });
+    const current = parseStrategyRows(rowResponse.data.values)[0];
+    if (!current) {
+        throw new Error('Strategy assignment not found to update');
+    }
+
+    const symbol = updates.symbol !== undefined ? updates.symbol.trim() : current.symbol;
+    const strategy = updates.strategy !== undefined ? updates.strategy.trim() : current.strategy;
+    const quantity = updates.quantity !== undefined
+        ? (updates.quantity === null ? undefined : updates.quantity)
+        : current.quantity;
+    const date = current.date || new Date().toISOString();
+
+    await sheets.spreadsheets.values.update({
+        spreadsheetId: sheetId,
+        range: `${range}!A${physicalRow}:D${physicalRow}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+            values: [[symbol, strategy, date, quantity ?? '']],
+        },
+    });
+
+    return { id, symbol, strategy, date, quantity };
+}
+
+// Renames a strategy everywhere it appears — the definition row plus every
+// per-holding assignment row — in one pass. Also normalizes each touched
+// row into the fixed [symbol, strategy, date, quantity] shape.
+export async function renameStrategy(oldName: string, newName: string): Promise<void> {
+    const sheets = await getSheets();
+    const sheetId = getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
+    const trimmedNew = newName.trim();
+    const range = 'Strategy';
+    const response = await sheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range: `${range}!A:Z`,
+    });
+    const rows = parseStrategyRows(response.data.values).filter((a) => a.strategy === oldName);
+    if (rows.length === 0) return;
+
+    await sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: sheetId,
+        requestBody: {
+            valueInputOption: 'USER_ENTERED',
+            data: rows.map((a) => {
+                const physicalRow = parseInt(a.id.match(/-(\d+)$/)![1], 10);
+                return {
+                    range: `${range}!A${physicalRow}:D${physicalRow}`,
+                    values: [[a.symbol, trimmedNew, a.date, a.quantity ?? '']],
+                };
+            }),
+        },
+    });
+}
+
+// Deletes a strategy entirely: its definition row plus every per-holding
+// assignment row that references it. Any holdings that were only assigned
+// to this strategy fall back to Unassigned.
+export async function deleteStrategy(name: string): Promise<void> {
+    const sheets = await getSheets();
+    const sheetId = getSheetId();
+
+    if (!sheetId) {
+      throw new Error('Google Sheets Sheet ID not configured');
+    }
+
+    const range = 'Strategy';
+    const response = await sheets.spreadsheets.values.get({
+        spreadsheetId: sheetId,
+        range: `${range}!A:Z`,
+    });
+    const rows = parseStrategyRows(response.data.values).filter((a) => a.strategy === name);
+    if (rows.length === 0) return;
+
+    const targetSheetId = await getSheetIdByName(sheets, sheetId, range);
+    if (targetSheetId === undefined) {
+        throw new Error(`Could not find sheet ID for "${range}" to delete rows.`);
+    }
+
+    const physicalRows = rows
+        .map((a) => parseInt(a.id.match(/-(\d+)$/)![1], 10))
+        .sort((a, b) => b - a); // descending, so each delete doesn't shift the row index of the next one
+
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: sheetId,
+        requestBody: {
+            requests: physicalRows.map((physicalRow) => ({
+                deleteDimension: {
+                    range: {
+                        sheetId: targetSheetId,
+                        dimension: 'ROWS',
+                        startIndex: physicalRow - 1,
+                        endIndex: physicalRow,
+                    },
+                },
+            })),
+        },
+    });
 }
 
 export async function deleteStrategyAssignment(id: string): Promise<void> {
