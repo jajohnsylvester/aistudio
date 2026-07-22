@@ -136,6 +136,28 @@ function getStrategyColor(strategy: string, strategies: string[]): string {
   return STRATEGY_COLORS[(idx >= 0 ? idx : 0) % STRATEGY_COLORS.length];
 }
 
+// Builds a single tooltip listing every strategy an asset's quantity has
+// been split across (plus any leftover unassigned amount), so hovering on
+// the asset anywhere in the Strategy Allocation section — not just its chip
+// in one particular strategy — shows the full picture. Returns undefined
+// when the holding isn't actually split (nothing to add beyond the normal
+// name/symbol tooltip), so callers can fall back to their existing title.
+function getSplitBreakdownTooltip(h: HoldingWithStrategy): string | undefined {
+  const isSplit = h.strategyAssignments.length > 1 || (h.strategyAssignments.length >= 1 && h.remainingQuantity > 0);
+  if (!isSplit) return undefined;
+
+  const parts = h.strategyAssignments.map((sa) => {
+    const qty = typeof sa.quantity === 'number' ? sa.quantity : h.quantity;
+    return `${qty} → ${sa.strategy}`;
+  });
+  if (h.remainingQuantity > 0) {
+    parts.push(`${h.remainingQuantity} → Unassigned`);
+  }
+
+  const namePart = h.name && h.name !== h.displaySymbol ? ` (${h.name})` : '';
+  return `${h.displaySymbol}${namePart} — ${h.quantity} total split as: ${parts.join(', ')}`;
+}
+
 function formatINR(value: number): string {
   return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -1361,9 +1383,10 @@ function PaytmPortfolioContent() {
                             className="px-2.5 py-1.5 rounded-md border text-xs font-semibold cursor-grab active:cursor-grabbing shadow-sm select-none flex items-center gap-1.5"
                             style={isNew ? { backgroundColor: '#FFFBEB', borderColor: NEW_HOLDING_COLOR, color: '#92400E' } : { backgroundColor: 'white' }}
                             title={
-                              h.isSyntheticSymbol
+                              getSplitBreakdownTooltip(h) ??
+                              (h.isSyntheticSymbol
                                 ? `Original symbol from Paytm: "${h.trading_symbol}"`
-                                : (h.name && h.name !== h.displaySymbol ? h.name : undefined)
+                                : (h.name && h.name !== h.displaySymbol ? h.name : undefined))
                             }
                           >
                             {isNew && <span className="h-1.5 w-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: NEW_HOLDING_COLOR }} />}
@@ -1476,11 +1499,11 @@ function PaytmPortfolioContent() {
                             s.holdings.map((h) => {
                               const assignment = h.strategyAssignments.find((sa) => sa.strategy === s.strategy)!;
                               const isSplit = typeof assignment.quantity === 'number' && assignment.quantity !== h.quantity;
-                              const tooltip = isSplit
-                                ? `${assignment.quantity} of ${h.quantity} units${h.name && h.name !== h.displaySymbol ? ` — ${h.name}` : ''}`
-                                : (h.isSyntheticSymbol
-                                    ? `Original symbol from Paytm: "${h.trading_symbol}"`
-                                    : (h.name && h.name !== h.displaySymbol ? h.name : undefined));
+                              const tooltip = getSplitBreakdownTooltip(h) ?? (
+                                h.isSyntheticSymbol
+                                  ? `Original symbol from Paytm: "${h.trading_symbol}"`
+                                  : (h.name && h.name !== h.displaySymbol ? h.name : undefined)
+                              );
                               return (
                                 <div
                                   key={assignment.id}
