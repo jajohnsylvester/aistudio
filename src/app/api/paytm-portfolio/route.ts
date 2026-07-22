@@ -76,6 +76,11 @@ interface EnrichedHolding extends Holding {
   display_symbol: string;
   is_synthetic_symbol: boolean;
   is_new_holding: boolean;
+  // Full/company name of the asset (e.g. "Infosys Limited" for INFY), used
+  // client-side purely for a hover tooltip over the (often cryptic) trading
+  // symbol. Falls back to the trading symbol itself when Paytm doesn't
+  // supply a distinct name for the instrument.
+  name: string;
 }
 
 function assignDisplaySymbols(holdings: Holding[]): { displaySymbol: string; isSynthetic: boolean }[] {
@@ -114,7 +119,7 @@ function assignDisplaySymbols(holdings: Holding[]): { displaySymbol: string; isS
 // the client. getStrategyAssignments() already swallows its own Sheets
 // errors and returns [], so a Sheets outage degrades to "nothing flagged
 // as new" instead of breaking the portfolio endpoint.
-async function enrichHoldings(holdings: Holding[]): Promise<EnrichedHolding[]> {
+async function enrichHoldings(holdings: Holding[], names: string[]): Promise<EnrichedHolding[]> {
   const resolved = assignDisplaySymbols(holdings);
 
   const assignments = await getStrategyAssignments();
@@ -125,6 +130,7 @@ async function enrichHoldings(holdings: Holding[]): Promise<EnrichedHolding[]> {
     display_symbol: resolved[idx].displaySymbol,
     is_synthetic_symbol: resolved[idx].isSynthetic,
     is_new_holding: !knownSymbols.has(resolved[idx].displaySymbol),
+    name: names[idx] || h.trading_symbol,
   }));
 }
 
@@ -155,7 +161,7 @@ function isJwtExpired(token: string): boolean {
   return Date.now() >= (expiryMs - bufferMs);
 }
 
-async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holdings: Holding[]; upstreamTime: string }> {
+async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holdings: Holding[]; names: string[]; upstreamTime: string }> {
   try {
     console.log("=== [PAYTM API DEBUG] STARTING FETCH HOLDINGS CALL ===");
     const holdingsRaw = await callPaytmAPI(API_ROUTES.holdings, readAccessToken);
@@ -183,6 +189,13 @@ async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holding
 
     console.log(`[PAYTM API DEBUG] Final isolated holdings count for mapping loop: ${rawHoldings.length}`);
 
+    // Full/company name, kept in a parallel array (rather than on the
+    // Holding objects themselves) so the shape of `Holding` — and every
+    // downstream consumer typed against it — stays unchanged. Falls back
+    // through the same kind of fields Paytm uses for company/instrument
+    // names, and finally to the trading symbol itself.
+    const holdingNames: string[] = [];
+
     const mappedHoldings: Holding[] = rawHoldings.map((raw) => {
       const h = (raw || {}) as Record<string, unknown>;
       const quantity = parseFloat((h.quantity || h.qty) as string) || 0;
@@ -200,6 +213,12 @@ async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holding
 
       const tradingSymbol = (h.nse_symbol || h.bse_symbol || h.display_name || h.trading_symbol || 'Unknown') as string;
 
+      const fullName = (
+        h.company_name || h.companyName || h.instrument_name || h.instrumentName ||
+        h.security_name || h.securityName || h.description || h.name || tradingSymbol
+      ) as string;
+      holdingNames.push(fullName);
+
       return {
         trading_symbol: tradingSymbol,
         exchange: (h.exchange && h.exchange !== 'ALL') ? (h.exchange as string) : (h.nse_symbol ? 'NSE' : 'BSE'),
@@ -216,6 +235,7 @@ async function fetchHoldingsWithTime(readAccessToken: string): Promise<{ holding
 
     return {
       holdings: mappedHoldings,
+      names: holdingNames,
       upstreamTime: (holdingsRaw as { responseDate?: string })?.responseDate || fallbackTime
     };
   } catch (error: any) {
@@ -388,7 +408,7 @@ export async function GET(request: NextRequest) {
         }, { status: 401 });
       }
 
-      const { holdings, upstreamTime } = await fetchHoldingsWithTime(cookieToken.value);
+      const { holdings, names: holdingNames, upstreamTime } = await fetchHoldingsWithTime(cookieToken.value);
       const totalInvestment = holdings.reduce((s, h) => s + h.investment_value, 0);
       const totalCurrentValue = holdings.reduce((s, h) => s + h.current_value, 0);
       const totalPnl = totalCurrentValue - totalInvestment;
@@ -406,10 +426,10 @@ export async function GET(request: NextRequest) {
       // against the source of truth, rather than guessed on the client.
       let enrichedHoldings: EnrichedHolding[];
       try {
-        enrichedHoldings = await enrichHoldings(holdings);
+        enrichedHoldings = await enrichHoldings(holdings, holdingNames);
       } catch (error) {
         console.error('[PAYTM API DEBUG] Enrichment against Strategy sheet failed, falling back to raw holdings:', error);
-        enrichedHoldings = holdings.map((h) => ({ ...h, display_symbol: h.trading_symbol, is_synthetic_symbol: false, is_new_holding: false }));
+        enrichedHoldings = holdings.map((h, idx) => ({ ...h, display_symbol: h.trading_symbol, is_synthetic_symbol: false, is_new_holding: false, name: holdingNames[idx] || h.trading_symbol }));
       }
       const newHoldingsCount = enrichedHoldings.filter((h) => h.is_new_holding).length;
 
